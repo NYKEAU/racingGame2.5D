@@ -1,0 +1,143 @@
+/* Styles nécessaires pour le canvas et le menu */
+body,
+html {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: Arial, Helvetica, sans-serif;
+  background: linear-gradient(135deg, #87ceeb 0%, #4a90e2 100%);
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Menu principal */
+.menu-container {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background-color: rgba(0, 0, 0, 0.8);
+  border-radius: 15px;
+  padding: 30px;
+  width: 80%;
+  max-width: 500px;
+  text-align: center;
+  color: white;
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+}
+
+.game-title {
+  font-size: 2.5rem;
+  margin-top: 0;
+  margin-bottom: 30px;
+  color: #4dc1f9;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.menu-button {
+  background-color: #4dc1f9;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 12px 24px;
+  font-size: 1.2rem;
+  margin: 10px 0;
+  cursor: pointer;
+  transition: background-color 0.3s, transform 0.2s;
+  width: 80%;
+}
+
+.menu-button:hover {
+  background-color: #3a95c9;
+  transform: scale(1.05);
+}
+
+.menu-button:active {
+  transform: scale(0.98);
+}
+
+/* Container SEED */
+.seed-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 20px 0;
+  gap: 10px;
+}
+
+label {
+  font-size: 1.1rem;
+  color: #4dc1f9;
+}
+
+#seed-input {
+  background-color: rgba(255, 255, 255, 0.1);
+  border: 2px solid #4dc1f9;
+  border-radius: 5px;
+  padding: 8px 12px;
+  color: white;
+  font-size: 1rem;
+  width: 120px;
+  text-align: center;
+}
+
+.random-seed-button {
+  background-color: #4dc1f9;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.random-seed-button:hover {
+  background-color: #3a95c9;
+}
+
+/* Instructions */
+.instructions {
+  margin-top: 20px;
+  text-align: left;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  padding-top: 20px;
+}
+
+/* Bouton retour au menu */
+.back-button {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  background-color: rgba(0, 0, 0, 0.6);
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 8px 15px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.3s;
+  z-index: 1000;
+}
+
+.back-button:hover {
+  background-color: rgba(0, 0, 0, 0.8);
+}
+
+.controls-info {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 10px 15px;
+  border-radius: 5px;
+  font-size: 14px;
+  z-index: 1000;
+}
