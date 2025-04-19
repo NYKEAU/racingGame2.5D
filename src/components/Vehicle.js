@@ -45,21 +45,26 @@ export default class Vehicle {
   }
 
   setupVehicle() {
-    // Création du châssis
+    // Création du châssis - Modifications pour le rendre extrêmement léger et réactif
     this.carBody = new CANNON.Body({
-      mass: 7, // Masse augmentée (était 2) pour plus de stabilité
-      position: new CANNON.Vec3(5, 7, 0), // Position initiale légèrement plus haute
+      mass: 1.5, // Masse drastiquement réduite (était 3) pour un comportement ultra-léger
+      position: new CANNON.Vec3(5, 7, 0), // Position initiale
       shape: new CANNON.Box(new CANNON.Vec3(1.5, 0.4, 1.5)), // Châssis compact
-      angularDamping: 0.3, // Augmenté (était 0.2) pour réduire les rotations excessives
-      linearDamping: 0.15, // Augmenté (était 0.1) pour un meilleur contrôle
+      angularDamping: 0.05, // Presque pas d'amortissement angulaire pour des rotations folles
+      linearDamping: 0.02, // Presque pas d'amortissement linéaire pour glisser partout
+      allowSleep: true, // Permettre la mise en veille des corps pour économiser les ressources
     });
 
-    // Ajuster le centre de masse vers l'avant
-    this.carBody.shapeOffsets[0] = new CANNON.Vec3(0.3, 0, 0);
+    // Ajuster le centre de masse vers l'avant et vers le haut pour favoriser les wheelies et front flips
+    this.carBody.shapeOffsets[0] = new CANNON.Vec3(0.4, 0.2, 0);
 
     // Contraindre le mouvement pour rester en 2.5D
     this.carBody.linearFactor = new CANNON.Vec3(1, 1, 0);
     this.carBody.angularFactor = new CANNON.Vec3(0, 0, 1);
+
+    // Paramètres de sommeil pour optimiser les performances
+    this.carBody.sleepSpeedLimit = 0.5; // Mettre en veille si la vitesse est inférieure
+    this.carBody.sleepTimeLimit = 1.0; // Temps en secondes avant la mise en veille
 
     // Création du véhicule rigide
     this.vehicle = new CANNON.RigidVehicle({
@@ -74,12 +79,12 @@ export default class Vehicle {
   }
 
   addWheels() {
-    const mass = 0.5;
+    const mass = 0.1; // Masse des roues très réduite pour un effet ultra-léger
     const axisWidth = 3;
     const wheelShape = new CANNON.Sphere(0.8);
     const down = new CANNON.Vec3(0, -1, 0);
 
-    // Configuration des positions des roues - Augmenter la distance au châssis
+    // Configuration des positions des roues
     const wheelPositions = [
       { pos: new CANNON.Vec3(-0.8, -0.6, axisWidth / 2), isFront: true },
       { pos: new CANNON.Vec3(-0.8, -0.6, -axisWidth / 2), isFront: true },
@@ -95,7 +100,7 @@ export default class Vehicle {
       });
 
       wheelBody.addShape(wheelShape);
-      wheelBody.angularDamping = 0.2;
+      wheelBody.angularDamping = 0.05; // Réduit drastiquement pour favoriser la rotation des roues
       wheelBody.linearFactor = new CANNON.Vec3(1, 1, 0); // Contrainte en Z
 
       this.vehicle.addWheel({
@@ -110,23 +115,72 @@ export default class Vehicle {
   }
 
   setupVisuals() {
-    // Châssis - plus coloré et mieux visible - Ajuster la position visuelle pour correspondre à la physique
-    const boxGeometry = new THREE.BoxGeometry(3, 0.8, 3);
-    const boxMaterial = new THREE.MeshStandardMaterial({
-      color: 0x4287f5, // Bleu plus vif
-      roughness: 0.4,
-      metalness: 0.6,
-      emissive: 0x112244, // Légère lueur pour mieux se démarquer
-      emissiveIntensity: 0.2,
-    });
-    const boxMesh = new THREE.Mesh(boxGeometry, boxMaterial);
-    boxMesh.position.set(0.3, 0, 0);
-    boxMesh.castShadow = true; // Ajouter des ombres
-    boxMesh.receiveShadow = true;
-    this.scene.add(boxMesh);
-    this.meshes.chassis = boxMesh;
+    // Création d'un groupe pour le chassis de la voiture télécommandée
+    const chassisGroup = new THREE.Group();
+    this.scene.add(chassisGroup);
 
-    // Roues avec un aspect plus détaillé
+    // Base du chassis (plus large pour une meilleure visibilité)
+    const baseGeometry = new THREE.BoxGeometry(3, 0.4, 3);
+    const baseMaterial = new THREE.MeshStandardMaterial({
+      color: 0x33ccff, // Cyan plus prononcé pour la base
+      roughness: 0.3,
+      metalness: 0.5,
+    });
+    const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
+    baseMesh.position.set(0.3, -0.1, 0);
+    baseMesh.castShadow = true;
+    baseMesh.receiveShadow = true;
+    chassisGroup.add(baseMesh);
+
+    // Cabine / cockpit (plus grand et plus visible) - à l'avant à droite
+    const cockpitGeometry = new THREE.BoxGeometry(1.5, 0.6, 2.2);
+    const cockpitMaterial = new THREE.MeshStandardMaterial({
+      color: 0xff6600, // Orange plus foncé pour correspondre à l'image
+      roughness: 0.4,
+      metalness: 0.4,
+    });
+    const cockpitMesh = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+    cockpitMesh.position.set(0.8, 0.45, 0); // À l'avant (droite)
+    cockpitMesh.castShadow = true;
+    cockpitMesh.receiveShadow = true;
+    chassisGroup.add(cockpitMesh);
+
+    // Pare-brise simplifié (plus grand et visible) - à l'avant
+    const windshieldGeometry = new THREE.BoxGeometry(0.8, 0.5, 1.8);
+    const windshieldMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff, // Blanc au lieu de bleu-blanc pour être plus visible
+      roughness: 0.1,
+      metalness: 0.9,
+      transparent: true,
+      opacity: 0.8,
+    });
+    const windshieldMesh = new THREE.Mesh(
+      windshieldGeometry,
+      windshieldMaterial
+    );
+    windshieldMesh.position.set(1.5, 0.3, 0); // À l'extrémité avant (droite)
+    windshieldMesh.rotation.z = -Math.PI * 0.15; // Inclinaison
+    windshieldMesh.castShadow = false;
+    windshieldMesh.receiveShadow = false;
+    chassisGroup.add(windshieldMesh);
+
+    // Aileron arrière (élément caractéristique simplifié) - à l'arrière
+    const spoilerGeometry = new THREE.BoxGeometry(0.6, 0.2, 3.3);
+    const spoilerMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffdd00, // Jaune vif comme sur l'image
+      roughness: 0.5,
+      metalness: 0.3,
+    });
+    const spoilerMesh = new THREE.Mesh(spoilerGeometry, spoilerMaterial);
+    spoilerMesh.position.set(-1.1, 0.6, 0); // À l'arrière (gauche)
+    spoilerMesh.castShadow = true;
+    spoilerMesh.receiveShadow = true;
+    chassisGroup.add(spoilerMesh);
+
+    // Assigner le groupe comme chassis pour le véhicule
+    this.meshes.chassis = chassisGroup;
+
+    // Roues avec un aspect plus détaillé - INCHANGÉ comme demandé
     for (let i = 0; i < 4; i++) {
       // Groupe pour contenir la roue et ses détails
       const wheelGroup = new THREE.Group();
@@ -174,7 +228,6 @@ export default class Vehicle {
     // En l'air, réduire considérablement la force appliquée aux roues
     const adjustedForce = this.inAir ? force * 0.1 : force;
 
-    // Appliquer la force à toutes les 4 roues
     for (let i = 0; i < 4; i++) {
       // Vérifier si la vitesse angulaire de la roue est déjà au maximum
       if (this.wheelBodies[i]) {
@@ -202,24 +255,28 @@ export default class Vehicle {
   applyAirControl(direction) {
     // Vérifier si le véhicule est en l'air en mesurant la vitesse verticale
     const verticalVelocity = Math.abs(this.carBody.velocity.y);
-    this.inAir = verticalVelocity > 0.5;
+    this.inAir = verticalVelocity > 0.1; // Seuil très bas pour détecter l'état "en l'air" encore plus facilement
 
     if (this.inAir) {
-      // Force de rotation plus faible en l'air pour un contrôle subtil
-      const airTorque = 4 * direction;
+      console.log(`Applying air control: direction ${direction}`);
+      // Force de rotation extrême en l'air pour des cascades spectaculaires
+      const airTorque = 12 * direction; // Augmenté à 12 pour des rotations extrêmement rapides
 
       // Appliquer un couple pour faire pivoter le véhicule
       this.carBody.torque.set(0, 0, airTorque);
 
-      // Légère poussée dans la direction du mouvement pour simuler un accélérateur/frein en l'air
-      // Réduction significative de la force pour empêcher l'accélération excessive
-      const forwardForce = new CANNON.Vec3(direction * 0.5, 0, 0);
-      this.carBody.applyLocalForce(forwardForce, new CANNON.Vec3(0, 0, 0));
+      // Appliquer une impulsion vers le haut plus forte pendant les rotations
+      if (Math.abs(this.carBody.angularVelocity.z) > 2) {
+        this.carBody.applyImpulse(
+          new CANNON.Vec3(0, 1.0, 0),
+          new CANNON.Vec3(0, 0, 0)
+        );
+      }
 
-      return true; // Contrôle aérien appliqué
+      return true;
     }
 
-    return false; // Véhicule au sol
+    return false;
   }
 
   // Méthode pour réinitialiser le véhicule
@@ -284,16 +341,8 @@ export default class Vehicle {
         });
       }
     } else if (carUpVector.y < 0.1 && carUpVector.y >= -0.9) {
-      // Zone "instable" (de côté) - légère aide à la stabilité sans forcer le redressement
-      if (Math.abs(this.carBody.angularVelocity.z) < 2) {
-        // Appliquer une force de rotation très légère pour aider à se remettre droit ou à finir de se retourner
-        // mais seulement si le véhicule n'est pas déjà en train de tourner rapidement
-        const helpRotation = new CANNON.Vec3(0, 0, carUpVector.x > 0 ? 1 : -1);
-        this.carBody.angularVelocity.vadd(
-          helpRotation,
-          this.carBody.angularVelocity
-        );
-      }
+      // Zone "instable" (de côté) - aucune aide de stabilité pour permettre plus de cascade
+      // Ne rien faire délibérément pour laisser le véhicule se retourner naturellement
     } else {
       // Mode normal (à l'endroit)
       // Réinitialiser la friction standard
@@ -310,8 +359,9 @@ export default class Vehicle {
       }
     }
 
-    // Limiter la vitesse angulaire pour éviter les rotations excessives
-    const maxAngularVelocity = 10; // Augmenté pour permettre des rotations plus rapides
+    // Limiter la vitesse angulaire pour éviter les rotations trop rapides
+    // mais permettre quand même des rotations spectaculaires
+    const maxAngularVelocity = 15; // Augmenté pour permettre des rotations plus rapides
     if (this.carBody.angularVelocity.z > maxAngularVelocity) {
       this.carBody.angularVelocity.z = maxAngularVelocity;
     } else if (this.carBody.angularVelocity.z < -maxAngularVelocity) {
@@ -387,24 +437,27 @@ export default class Vehicle {
     }
   }
 
-  // Getter pour accéder au corps du véhicule
+  // Nouvelles méthodes accesseurs pour simplifier l'accès aux propriétés
   getChassisBody() {
     return this.carBody;
   }
 
-  // Getter pour vérifier si le véhicule est en l'air
   isInAir() {
     return this.inAir;
   }
 
-  // Getter pour obtenir la vitesse du véhicule en km/h
   getSpeedKmh() {
     if (!this.carBody) return 0;
 
-    // Calculer la vitesse à partir de la vélocité horizontale (x)
-    const speedMs = Math.abs(this.carBody.velocity.x);
+    // Convertir vitesse de m/s en km/h (facteur 3.6)
+    const speed = this.carBody.velocity.length() * 3.6;
 
-    // Convertir m/s en km/h (1 m/s = 3.6 km/h)
-    return Math.round(speedMs * 3.6);
+    // Arrondir à l'entier le plus proche
+    return Math.round(speed);
+  }
+
+  // Getter pour accéder à la mesh du véhicule
+  get mesh() {
+    return this.meshes.chassis;
   }
 }

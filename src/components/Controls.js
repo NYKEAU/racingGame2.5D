@@ -2,51 +2,97 @@ import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
 
 export default class Controls {
-  constructor(vehicle, getTerrainHeightAt) {
+  constructor(vehicle, getTerrainHeightCallback) {
     this.vehicle = vehicle;
-    this.getTerrainHeightAt = getTerrainHeightAt;
-    this.maxForce = 25;
-    this.keys = {};
-    this.wheelForce = 0;
-    this.brakeForce = 0;
-    this.airControlActive = false;
-    this.setupControls();
+    this.getTerrainHeight = getTerrainHeightCallback;
+    this.enabled = true; // Enable controls by default
 
-    // Ajout d'un état pour suivre les touches actuellement pressées
-    this.keysPressed = {
+    // Vitesse du véhicule
+    this.maxForce = 1000;
+    this.brakeForce = 20;
+
+    // État des touches
+    this.keys = {
       forward: false,
       backward: false,
+      left: false,
+      right: false,
     };
 
-    // Définition explicite de gameInstance pour éviter les erreurs
-    if (window.gameInstance === undefined) {
-      console.warn(
-        "gameInstance n'est pas définie dans window, l'initialisation est susceptible d'échouer"
-      );
-    }
+    // Touches personnalisables
+    this.keyMapping = {
+      forward: ['ArrowUp', 'w', 'z'],
+      backward: ['ArrowDown', 's'],
+      left: ['ArrowLeft', 'a', 'q'],
+      right: ['ArrowRight', 'd'],
+    };
+
+    console.log('Controls constructor: enabled =', this.enabled);
+
+    // Initialiser les écouteurs d'événements
+    this.initEventListeners();
   }
 
-  setupControls() {
-    // Gestionnaire pour les touches enfoncées
-    this.onKeyDown = this.handleKeyDown.bind(this);
-    this.onKeyUp = this.handleKeyUp.bind(this);
+  initEventListeners() {
+    // Gestionnaire d'événements de touche pressée
+    this.keyDownHandler = (event) => {
+      if (!this.enabled) {
+        console.log('Controls disabled: ignoring keydown event');
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+
+      // Gestion des touches
+      if (this.keyMapping.forward.map((k) => k.toLowerCase()).includes(key)) {
+        this.keys.forward = true;
+      } else if (
+        this.keyMapping.backward.map((k) => k.toLowerCase()).includes(key)
+      ) {
+        this.keys.backward = true;
+      } else if (
+        this.keyMapping.left.map((k) => k.toLowerCase()).includes(key)
+      ) {
+        this.keys.left = true;
+      } else if (
+        this.keyMapping.right.map((k) => k.toLowerCase()).includes(key)
+      ) {
+        this.keys.right = true;
+      }
+    };
+
+    // Gestionnaire d'événements de touche relâchée
+    this.keyUpHandler = (event) => {
+      if (!this.enabled) return;
+
+      const key = event.key.toLowerCase();
+
+      // Gestion des touches
+      if (this.keyMapping.forward.map((k) => k.toLowerCase()).includes(key)) {
+        this.keys.forward = false;
+      } else if (
+        this.keyMapping.backward.map((k) => k.toLowerCase()).includes(key)
+      ) {
+        this.keys.backward = false;
+      } else if (
+        this.keyMapping.left.map((k) => k.toLowerCase()).includes(key)
+      ) {
+        this.keys.left = false;
+      } else if (
+        this.keyMapping.right.map((k) => k.toLowerCase()).includes(key)
+      ) {
+        this.keys.right = false;
+      }
+    };
 
     // Ajouter les écouteurs d'événements
-    window.addEventListener('keydown', this.onKeyDown);
-    window.addEventListener('keyup', this.onKeyUp);
-  }
+    document.addEventListener('keydown', this.keyDownHandler);
+    document.addEventListener('keyup', this.keyUpHandler);
 
-  handleKeyDown(event) {
-    this.keys[event.key.toLowerCase()] = true;
-
-    // Touche R pour reset
-    if (event.key.toLowerCase() === 'r') {
-      this.resetVehicle();
-    }
-  }
-
-  handleKeyUp(event) {
-    this.keys[event.key.toLowerCase()] = false;
+    console.log(
+      'Controls: Event listeners initialized with mappings:',
+      this.keyMapping
+    );
   }
 
   // Nouvelle méthode pour déterminer si le véhicule est à l'envers
@@ -75,11 +121,13 @@ export default class Controls {
 
   // Méthode pour appliquer les forces en tenant compte de l'orientation
   updateWheelForces() {
+    // Si les contrôles sont désactivés, ne rien faire
+    if (!this.enabled) return;
+
     const maxForce = 40; // Force maximale
     const forceIncrement = 2.5; // Vitesse d'accélération
     const forceDamping = 1; // Vitesse de décélération
 
-    // CORRECTION: Touches Z et S étaient inversées
     // Touche Z ou flèche haut pour accélérer (avec valeur négative car notre système de forces est inversé)
     if (this.keys['z'] || this.keys['arrowup']) {
       this.wheelForce = Math.max(this.wheelForce - forceIncrement, -maxForce);
@@ -112,6 +160,99 @@ export default class Controls {
     }
   }
 
+  update() {
+    if (!this.enabled) {
+      return;
+    }
+
+    if (!this.vehicle) {
+      console.warn('Contrôles activés mais véhicule non disponible');
+      return;
+    }
+
+    // Calcul de la force à appliquer
+    let force = 0;
+    let steeringAngle = 0;
+
+    // Accélération avant (droite)/arrière (gauche) - INVERSÉ pour correspondre à l'orientation désirée
+    if (this.keys.forward) {
+      // Avancer vers la droite (valeur positive)
+      force = this.maxForce;
+    } else if (this.keys.backward) {
+      // Reculer vers la gauche (valeur négative)
+      force = -this.maxForce / 2;
+    }
+
+    // Freinage
+    if (this.keys.forward && this.keys.backward) {
+      force = -this.brakeForce;
+    }
+
+    // Direction gauche/droite
+    if (this.keys.left) {
+      steeringAngle = 0.5; // Rotation à gauche
+    } else if (this.keys.right) {
+      steeringAngle = -0.5; // Rotation à droite
+    }
+
+    // S'assurer que le véhicule a les méthodes nécessaires
+    if (typeof this.vehicle.applyForceToAllWheels === 'function') {
+      // Multiplier la force par -1 pour inverser la direction
+      this.vehicle.applyForceToAllWheels(-force); // Le signe est inversé pour correspondre à la direction désirée
+    } else {
+      console.error('La méthode applyForceToAllWheels est manquante');
+    }
+
+    // Appliquer la rotation
+    this.applySteeringAngle(steeringAngle);
+
+    // Contrôle aérien si le véhicule est en l'air
+    this.applyAirControl();
+  }
+
+  applySteeringAngle(angle) {
+    // S'assurer que le véhicule existe
+    if (!this.vehicle) return;
+
+    try {
+      // Rotation du châssis du véhicule
+      const chassisBody = this.vehicle.getChassisBody();
+      if (chassisBody) {
+        // Appliquer une rotation au châssis
+        chassisBody.angularVelocity.z = angle * 3;
+      }
+    } catch (error) {
+      console.error("Erreur lors de l'application de la direction:", error);
+    }
+  }
+
+  applyAirControl() {
+    // S'assurer que le véhicule existe
+    if (!this.vehicle) return;
+
+    try {
+      // Vérifier si le véhicule est en l'air
+      if (this.vehicle.inAir) {
+        // Direction pour le contrôle aérien
+        let direction = 0;
+
+        if (this.keys.left) {
+          direction += 1;
+        }
+        if (this.keys.right) {
+          direction -= 1;
+        }
+
+        // Appliquer le contrôle aérien si nécessaire
+        if (direction !== 0) {
+          this.vehicle.applyAirControl(direction);
+        }
+      }
+    } catch (error) {
+      console.error("Erreur lors de l'application du contrôle aérien:", error);
+    }
+  }
+
   resetVehicle() {
     try {
       // Récupération directe de gameInstance depuis window
@@ -133,8 +274,8 @@ export default class Controls {
 
         // Essayer de réinitialiser le véhicule directement
         this.vehicle.reset((x) => {
-          return this.getTerrainHeightAt
-            ? this.getTerrainHeightAt(x) || defaultHeight
+          return this.getTerrainHeight
+            ? this.getTerrainHeight(x) || defaultHeight
             : defaultHeight;
         });
       }
@@ -145,7 +286,7 @@ export default class Controls {
 
   // Libérer les ressources et supprimer les écouteurs
   dispose() {
-    window.removeEventListener('keydown', this.onKeyDown);
-    window.removeEventListener('keyup', this.onKeyUp);
+    document.removeEventListener('keydown', this.keyDownHandler);
+    document.removeEventListener('keyup', this.keyUpHandler);
   }
 }

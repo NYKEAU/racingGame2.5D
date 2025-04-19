@@ -4,6 +4,7 @@ import './App.css';
 
 function App() {
   const [showMenu, setShowMenu] = useState(true);
+  const [showPauseMenu, setShowPauseMenu] = useState(false);
   const [seed, setSeed] = useState(Math.floor(Math.random() * 1000000));
   const [gameInstance, setGameInstance] = useState(null);
   const canvasRef = useRef(null);
@@ -23,10 +24,13 @@ function App() {
       // Petite temporisation pour s'assurer que le canvas est complètement rendu
       const timer = setTimeout(() => {
         try {
-          // Initialiser le jeu avec la référence du canvas
-          const game = new Game(canvasRef.current.id, seed);
+          // Passer la seed fournie par l'utilisateur
+          const game = new Game({
+            canvasId: 'myThreeJsCanvas',
+            seed: seed, // Utiliser la seed spécifiée dans l'interface
+          });
           setGameInstance(game);
-          window.gameInstance = game; // Pour permettre l'accès depuis d'autres composants
+          window.gameInstance = game; // For access from other components
         } catch (error) {
           console.error("Erreur lors de l'initialisation du jeu:", error);
           // Retour au menu en cas d'erreur
@@ -40,6 +44,7 @@ function App() {
 
   const startGame = () => {
     setShowMenu(false);
+    setShowPauseMenu(false);
     // L'initialisation du jeu se fait dans le useEffect ci-dessus
   };
 
@@ -50,6 +55,25 @@ function App() {
       window.gameInstance = null;
     }
     setShowMenu(true);
+    setShowPauseMenu(false);
+  };
+
+  const togglePauseMenu = () => {
+    if (gameInstance) {
+      const isPaused = gameInstance.togglePause();
+      setShowPauseMenu(!isPaused); // Si le jeu est en pause, montrer le menu de pause
+    }
+  };
+
+  const resumeGame = () => {
+    if (gameInstance && gameInstance.isPaused()) {
+      gameInstance.togglePause(); // Reprendre le jeu
+    }
+    setShowPauseMenu(false);
+  };
+
+  const reloadPage = () => {
+    window.location.reload();
   };
 
   return (
@@ -79,26 +103,14 @@ function App() {
           <div className="instructions">
             <p>Z ou ↑ pour avancer</p>
             <p>S ou ↓ pour reculer</p>
-            <p>R pour revenir à la position de départ</p>
+            <p>Q/A ou ← pour tourner à gauche</p>
+            <p>D ou → pour tourner à droite</p>
             <p>Contrôlez votre véhicule en l'air avec ↑ et ↓</p>
           </div>
         </div>
       ) : (
         <>
           <canvas id="myThreeJsCanvas" ref={canvasRef} />
-          <button
-            id="back-to-menu"
-            className="back-button"
-            onClick={returnToMenu}
-          >
-            Menu
-          </button>
-          <div className="controls-info">
-            <p>Flèches Haut/Bas ou Z/S pour avancer/reculer</p>
-            <p>
-              Touche R pour réinitialiser le véhicule en cas de retournement
-            </p>
-          </div>
         </>
       )}
     </>

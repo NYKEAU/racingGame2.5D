@@ -110,12 +110,47 @@ label {
   padding-top: 20px;
 }
 
+/* HUD (Head-Up Display) - Styles communs pour tous les éléments d'interface en jeu */
+.hud-element {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 10px 15px;
+  border-radius: 5px;
+  font-family: 'Arial', sans-serif;
+  font-size: 14px;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Menu de pause - styles supplémentaires spécifiques à App.css */
+/* Les propriétés principales sont dans style.css */
+.pause-title {
+  font-size: 2rem;
+  color: #4dc1f9;
+  margin-bottom: 20px;
+  text-shadow: 0 0 10px rgba(77, 193, 249, 0.5);
+}
+
+.pause-menu .menu-button {
+  margin: 10px 0;
+  width: 200px;
+  background-color: #4dc1f9;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 12px 24px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
 /* Bouton retour au menu */
 .back-button {
   position: absolute;
   top: 20px;
   left: 20px;
-  background-color: rgba(0, 0, 0, 0.6);
+  background-color: rgba(0, 0, 0, 0.7);
   color: white;
   border: none;
   border-radius: 5px;
@@ -123,21 +158,58 @@ label {
   font-size: 1rem;
   cursor: pointer;
   transition: background-color 0.3s;
-  z-index: 1000;
+  z-index: 1050;
 }
 
 .back-button:hover {
-  background-color: rgba(0, 0, 0, 0.8);
+  background-color: rgba(0, 0, 0, 0.9);
+  box-shadow: 0 0 8px rgba(77, 193, 249, 0.5);
 }
 
-.controls-info {
+/* Affichage des stats en jeu */
+#game-stats {
   position: absolute;
-  bottom: 20px;
-  left: 20px;
+  top: 20px;
+  right: 20px;
   background: rgba(0, 0, 0, 0.7);
   color: white;
   padding: 10px 15px;
   border-radius: 5px;
+  font-family: 'Arial', sans-serif;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Affichage de la SEED en jeu */
+#seed-display {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 5px;
+  font-family: 'Arial', sans-serif;
   font-size: 14px;
   z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Affichage FPS */
+#fps-display {
+  position: absolute;
+  top: 120px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 5px;
+  font-family: 'Arial', sans-serif;
+  font-size: 14px;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }

@@ -5,12 +5,34 @@ import * as CANNON from 'cannon-es';
 const TERRAIN_CONFIG = {
   VISIBLE_CHUNKS_AHEAD: 5, // Nombre de chunks à générer en avance
   VISIBLE_CHUNKS_BEHIND: 5, // Nombre de chunks à conserver derrière
-  DECORATION_DENSITY: 0.3, // Densité des décorations (0-1)
+  DECORATION_DENSITY: {
+    TREE: 0.1, // Densité des arbres (0-1) - réduite de 0.3 à 0.1
+    ROCK: 0.1, // Densité des rochers (0-1) - réduite de 0.3 à 0.1
+    SIGN: 0.2, // Densité des panneaux (0-1) - réduite de 0.3 à 0.2
+  },
   LOD_DISTANCES: {
     HIGH: 100, // Distance pour le niveau de détail élevé
     MEDIUM: 200, // Distance pour le niveau de détail moyen
     LOW: 400, // Distance pour le niveau de détail bas
   },
+  PHYSICS_SIMPLIFICATION: {
+    SEGMENT_STEP: 3, // Ne créer qu'un segment physique sur 3 (réduit les hitboxes)
+    SKIP_MINOR_SEGMENTS: true, // Ignorer les petits segments de terrain pour la physique
+  },
+};
+
+// Paramètres de debug pour le développement
+const DEBUG = {
+  SHOW_PHYSICS: false, // Désactivé - N'affiche plus les formes physiques
+  WIREFRAME: false, // Désactivé - N'affiche plus les maillages en wireframe
+};
+
+// Groupes de collision pour la physique
+const COLLISION_GROUPS = {
+  TERRAIN: 1,
+  VEHICLE: 2,
+  WHEELS: 4,
+  DECORATIONS: 8,
 };
 
 // Types d'éléments de décor
@@ -26,9 +48,25 @@ export default class Terrain {
     this.physicsWorld = physicsWorld;
     this.terrainMeshes = [];
     this.segmentWidth = 40;
-    this.segmentDepth = 8; // Ajouter la profondeur du terrain
-    this.visibleSegments = 15; // Ajouter le nombre de segments visibles
+    this.segmentDepth = 8; // Profondeur du terrain central
+    this.visibleSegments = 15;
     this.decorations = [];
+
+    // Configuration des zones du terrain
+    this.terrainConfig = {
+      central: {
+        width: 6, // Largeur de la zone jouable centrale
+        hasCollision: true,
+      },
+      borders: {
+        width: 20, // Largeur totale des bordures de chaque côté
+        hasCollision: false,
+      },
+    };
+
+    // Largeur totale du terrain (central + bordures)
+    this.totalWidth =
+      this.terrainConfig.central.width + this.terrainConfig.borders.width * 2;
 
     // Utiliser la SEED pour la génération du terrain
     this.seed = seed;
@@ -38,106 +76,364 @@ export default class Terrain {
     // Historique des types de chunks générés
     this.chunkHistory = [];
 
-    // Matériau unique pour le terrain
+    // Matériaux pour le terrain central et les bordures - Utiliser des matériaux opaques sans wireframe
     this.terrainMaterial = new THREE.MeshStandardMaterial({
       color: 0x2d572c,
       roughness: 0.8,
       metalness: 0.2,
+      wireframe: false,
+      flatShading: false,
+      side: THREE.DoubleSide, // S'assurer que les deux côtés sont rendus
+    });
+
+    this.borderMaterial = new THREE.MeshStandardMaterial({
+      color: 0x1e3e1e, // Couleur légèrement plus sombre pour les bordures
+      roughness: 0.9,
+      metalness: 0.1,
+      wireframe: false,
+      flatShading: false,
+      side: THREE.DoubleSide, // S'assurer que les deux côtés sont rendus
     });
 
     // Matériau pour les corps physiques
     this.terrainPhysicsMaterial = new CANNON.Material('terrain');
 
+    // Créer et initialiser le groundMaterial pour la physique
+    this.groundMaterial = new CANNON.Material('ground');
+    const wheelGroundContact = new CANNON.ContactMaterial(
+      new CANNON.Material('wheel'),
+      this.groundMaterial,
+      {
+        friction: 0.8,
+        restitution: 0.1,
+        contactEquationStiffness: 1e6,
+      }
+    );
+    if (this.physicsWorld) {
+      this.physicsWorld.addContactMaterial(wheelGroundContact);
+    }
+
+    // Système de pool d'objets pour les décorations
+    this.objectPools = {
+      rock: [],
+      tree: [],
+      sign: [],
+    };
+
+    // Initialiser les ressources de décorations
+    this.initializeDecorationResources();
+
     // Initialiser le terrain
-    this.initialTerrainWidth = 400; // 10 segments pour commencer (40x10)
+    this.initialTerrainWidth = 400;
     this.initialize();
   }
 
   // Initialisation des ressources pour les décorations
   initializeDecorationResources() {
-    // Géométries partagées pour les décorations
+    console.log('Initialisation des ressources pour les décorations');
+
+    // Créer directement les géométries et matériaux partagés
     this.sharedGeometries = {
       rock: [
-        new THREE.DodecahedronGeometry(1.0, 0), // Rocher grand
+        new THREE.DodecahedronGeometry(1.0, 0), // Grand rocher
         new THREE.DodecahedronGeometry(0.7, 0), // Rocher moyen
-        new THREE.DodecahedronGeometry(0.4, 0), // Rocher petit
+        new THREE.DodecahedronGeometry(0.4, 0), // Petit rocher
       ],
-      tree: [
-        // Tronc
-        new THREE.CylinderGeometry(0.2, 0.3, 2.0, 8),
-        // Feuillage
-        new THREE.ConeGeometry(1.5, 3.0, 8),
-      ],
-      sign: [
-        // Poteau
-        new THREE.CylinderGeometry(0.1, 0.1, 2.5, 6),
-        // Panneau
-        new THREE.BoxGeometry(1.5, 1.0, 0.1),
-      ],
+      tree: {
+        trunk: new THREE.CylinderGeometry(0.2, 0.3, 2.0, 8),
+        leaves: new THREE.ConeGeometry(1.5, 3.0, 8),
+      },
+      sign: {
+        post: new THREE.CylinderGeometry(0.1, 0.1, 2.5, 6),
+        panel: new THREE.BoxGeometry(1.5, 1.0, 0.1),
+        text: new THREE.PlaneGeometry(1.3, 0.8),
+      },
     };
 
-    // Matériaux partagés pour les décorations
     this.sharedMaterials = {
       rock: new THREE.MeshStandardMaterial({
         color: 0x888888,
         roughness: 0.9,
         metalness: 0.1,
       }),
-      treeTrunk: new THREE.MeshStandardMaterial({
-        color: 0x704214,
-        roughness: 0.9,
-        metalness: 0.0,
-      }),
-      treeLeaves: new THREE.MeshStandardMaterial({
-        color: 0x38761d,
-        roughness: 0.8,
-        metalness: 0.0,
-      }),
-      signPost: new THREE.MeshStandardMaterial({
-        color: 0x6d4c41,
-        roughness: 0.8,
-        metalness: 0.1,
-      }),
-      signPanel: new THREE.MeshStandardMaterial({
-        color: 0xf5f5f5,
-        roughness: 0.5,
-        metalness: 0.2,
-      }),
+      tree: {
+        trunk: new THREE.MeshStandardMaterial({
+          color: 0x704214,
+          roughness: 0.9,
+          metalness: 0.0,
+        }),
+        leaves: new THREE.MeshStandardMaterial({
+          color: 0x38761d,
+          roughness: 0.8,
+          metalness: 0.0,
+        }),
+      },
+      sign: {
+        post: new THREE.MeshStandardMaterial({
+          color: 0x6d4c41,
+          roughness: 0.8,
+          metalness: 0.1,
+        }),
+        panel: new THREE.MeshStandardMaterial({
+          color: 0xf5f5f5,
+          roughness: 0.5,
+          metalness: 0.2,
+        }),
+        text: new THREE.MeshBasicMaterial({
+          color: 0x000000,
+          side: THREE.DoubleSide,
+        }),
+      },
     };
+
+    // Initialiser les pools d'objets pour les décorations
+    this.objectPools = {
+      rock: [],
+      tree: [],
+      sign: [],
+    };
+
+    // Précharger quelques objets dans chaque pool
+    try {
+      // Rochers - créer 3 tailles différentes
+      for (let i = 0; i < 45; i++) {
+        const rockIndex = i % 3;
+        const rockGeometry = this.sharedGeometries.rock[rockIndex];
+        const rockMaterial = this.sharedMaterials.rock;
+
+        const rockMesh = new THREE.Mesh(rockGeometry, rockMaterial);
+        rockMesh.castShadow = true;
+        rockMesh.receiveShadow = true;
+        rockMesh.visible = false;
+
+        // Stocker le type dans les userData pour faciliter l'identification
+        rockMesh.userData = { type: DECORATION_TYPES.ROCK };
+
+        this.scene.add(rockMesh);
+        this.objectPools.rock.push(rockMesh);
+      }
+
+      // Arbres
+      for (let i = 0; i < 45; i++) {
+        const treeGroup = new THREE.Group();
+
+        // Tronc
+        const trunk = new THREE.Mesh(
+          this.sharedGeometries.tree.trunk,
+          this.sharedMaterials.tree.trunk
+        );
+        trunk.castShadow = true;
+        trunk.receiveShadow = true;
+        trunk.position.y = 1.0;
+        treeGroup.add(trunk);
+
+        // Feuillage
+        const leaves = new THREE.Mesh(
+          this.sharedGeometries.tree.leaves,
+          this.sharedMaterials.tree.leaves
+        );
+        leaves.castShadow = true;
+        leaves.receiveShadow = true;
+        leaves.position.y = 3.5;
+        treeGroup.add(leaves);
+
+        treeGroup.visible = false;
+        treeGroup.userData = { type: DECORATION_TYPES.TREE };
+
+        this.scene.add(treeGroup);
+        this.objectPools.tree.push(treeGroup);
+      }
+
+      // Panneaux
+      for (let i = 0; i < 20; i++) {
+        const signGroup = new THREE.Group();
+
+        // Poteau
+        const post = new THREE.Mesh(
+          this.sharedGeometries.sign.post,
+          this.sharedMaterials.sign.post
+        );
+        post.castShadow = true;
+        post.receiveShadow = true;
+        post.position.y = 1.25;
+        signGroup.add(post);
+
+        // Panneau
+        const panel = new THREE.Mesh(
+          this.sharedGeometries.sign.panel,
+          this.sharedMaterials.sign.panel
+        );
+        panel.castShadow = true;
+        panel.receiveShadow = true;
+        panel.position.y = 2.0;
+        signGroup.add(panel);
+
+        // Texte
+        const text = new THREE.Mesh(
+          this.sharedGeometries.sign.text,
+          this.sharedMaterials.sign.text
+        );
+        text.position.y = 2.0;
+        text.position.z = 0.06;
+        signGroup.add(text);
+
+        signGroup.visible = false;
+        signGroup.userData = { type: DECORATION_TYPES.SIGN };
+
+        this.scene.add(signGroup);
+        this.objectPools.sign.push(signGroup);
+      }
+
+      console.log('Ressources de décorations initialisées:', {
+        rochers: this.objectPools.rock.length,
+        arbres: this.objectPools.tree.length,
+        panneaux: this.objectPools.sign.length,
+      });
+    } catch (error) {
+      console.error("Erreur lors de l'initialisation des décorations:", error);
+    }
   }
 
   // Obtenir un objet du pool ou en créer un nouveau
   getFromPool(poolName, createFunc) {
-    const pool = this.objectPools[poolName];
-    if (pool && pool.length > 0) {
-      return pool.pop();
+    // Vérifier si le pool existe
+    if (!this.objectPools || !this.objectPools[poolName]) {
+      console.warn(`Pool ${poolName} non initialisé`);
+
+      // Initialiser le pool s'il n'existe pas
+      if (!this.objectPools) {
+        this.objectPools = {};
+      }
+      if (!this.objectPools[poolName]) {
+        this.objectPools[poolName] = [];
+      }
+
+      // Créer un nouvel objet
+      const newObject = createFunc();
+      return newObject;
     }
-    return createFunc();
+
+    // Obtenir un objet du pool ou en créer un nouveau
+    if (this.objectPools[poolName].length > 0) {
+      return this.objectPools[poolName].pop();
+    } else {
+      const newObject = createFunc();
+      return newObject;
+    }
   }
 
   // Retourner un objet au pool
   returnToPool(poolName, object) {
-    if (!this.objectPools[poolName]) {
-      this.objectPools[poolName] = [];
+    // Vérifier si le pool existe
+    if (!this.objectPools || !this.objectPools[poolName]) {
+      console.warn(`Pool ${poolName} non initialisé`);
+      return;
     }
+
+    // Cacher l'objet et le retourner au pool
+    object.visible = false;
     this.objectPools[poolName].push(object);
   }
 
-  // Initialisation du terrain
+  // Initialisation du terrain avec davantage de segments pour éviter les manques visuels
   initialize() {
-    const initialSegments = 30;
+    console.log('Initialisation complète du terrain avec tous les segments');
+
+    // Générer plus de segments initiaux pour éviter les zones manquantes
+    const initialSegments = 20; // Augmenté à 20 au lieu de 10
+
+    // Démarrer plus en arrière pour avoir un terrain visible dès le départ
+    const startOffset = -5;
 
     // Créer des segments initiaux avec un chevauchement pour éviter les trous
-    for (let i = -5; i < initialSegments; i++) {
-      this.createTerrainSegment(i * this.segmentWidth);
+    for (let i = startOffset; i < initialSegments + startOffset; i++) {
+      this.createTerrainSegment(i * this.segmentWidth, false); // Créer avec les décorations
     }
+
+    // S'assurer que tous les segments sont correctement configurés
+    this.terrainMeshes.forEach((segment) => {
+      // Vérifier que toutes les parties du segment sont bien connectées
+      if (segment.meshes) {
+        segment.meshes.forEach((mesh) => {
+          if (!mesh.parent) {
+            this.scene.add(mesh);
+          }
+        });
+      }
+    });
 
     // S'assurer que l'historique des chunks est correctement initialisé
     this.chunkHistory = this.terrainMeshes.map((segment) => segment.chunkType);
 
     console.log(
-      `Terrain initialisé avec ${this.terrainMeshes.length} segments`
+      `Terrain initialisé avec ${this.terrainMeshes.length} segments complets`
     );
+  }
+
+  // Méthode pour générer des segments supplémentaires après le chargement initial
+  generateAdditionalSegments() {
+    console.log('Génération des segments additionnels...');
+
+    // Ajout des décorations aux segments déjà créés
+    console.log('Ajout des décorations aux segments existants...');
+    this.terrainMeshes.forEach((segment) => {
+      if (segment.decorations && segment.decorations.length === 0) {
+        this.addTerrainDecorations(
+          segment.startX,
+          segment.points,
+          segment.chunkType,
+          segment.decorations
+        );
+      }
+    });
+
+    // Générer les segments restants de manière progressive
+    const totalSegments = 30; // Nombre total de segments à atteindre
+    const existingSegments = this.terrainMeshes.length;
+    const remainingSegments = Math.max(0, totalSegments - existingSegments);
+
+    if (remainingSegments <= 0) {
+      console.log('Aucun segment supplémentaire à générer');
+      return;
+    }
+
+    // Générer par lots pour éviter de bloquer le thread principal
+    this.scheduleRemainingSegments(existingSegments);
+  }
+
+  // Méthode pour générer progressivement les segments restants
+  scheduleRemainingSegments(startIndex) {
+    let currentIndex = 8; // Commencer après les segments initiaux
+
+    const generateNextBatch = () => {
+      const batchSize = 5;
+      let segmentsCreated = 0;
+
+      for (let i = 0; i < batchSize; i++) {
+        const segmentX = (currentIndex + i) * this.segmentWidth;
+        // Vérifier si le segment existe déjà
+        const exists = this.terrainMeshes.some(
+          (segment) => Math.abs(segment.startX - segmentX) < 0.1
+        );
+
+        if (!exists) {
+          this.createTerrainSegment(segmentX);
+          segmentsCreated++;
+        }
+      }
+
+      currentIndex += batchSize;
+
+      // Continuer jusqu'à avoir généré tous les segments désirés
+      if (currentIndex < 30 && segmentsCreated > 0) {
+        setTimeout(generateNextBatch, 300);
+      } else {
+        console.log('Génération des segments additionnels terminée');
+      }
+    };
+
+    // Commencer la génération avec un délai
+    setTimeout(generateNextBatch, 300);
   }
 
   // Utiliser la SEED pour générer un nombre pseudo-aléatoire déterministe
@@ -763,118 +1059,183 @@ export default class Terrain {
   }
 
   // Création d'un segment de terrain
-  createTerrainSegment(startX) {
+  createTerrainSegment(startX, priorityCreate = false) {
     const segmentIndex = Math.floor(startX / this.segmentWidth);
 
-    // Augmenter la densité des points pour une meilleure précision
-    const nbPoints = 50; // Augmenté de 40 à 50 pour plus de détails
+    // Toujours créer avec la qualité maximum, peu importe si c'est une création prioritaire
+    const quality = 'high';
+
+    // Générer un type de chunk (hills, plateau, ramps, etc.) en fonction de la position
+    const difficulty = Math.min(0.99, Math.max(0, Math.abs(startX) / 5000));
+    const chunkType = this.selectChunkType(difficulty);
+
+    // Nombre de points pour ce segment (plus élevé pour plus de détails)
+    const nbPoints = 30; // Augmenter pour plus de détails
+
+    // Stocker l'information sur le segment précédent pour des transitions douces
+    const previousEndHeight =
+      this.terrainMeshes.length > 0
+        ? this.terrainMeshes[this.terrainMeshes.length - 1].points[
+            this.terrainMeshes[this.terrainMeshes.length - 1].points.length - 1
+          ].height
+        : null;
+
+    // Générer le profil du terrain pour ce segment
     const points = [];
 
-    const chunkType = this.selectChunkType(
-      Math.min(0.1 + segmentIndex * 0.01, 0.9)
-    );
-
-    // Trouver le segment précédent et le segment suivant pour une transition plus douce
-    const previousSegment = this.terrainMeshes.find(
-      (s) => s.startX === startX - this.segmentWidth
-    );
-
-    const previousEndHeight = previousSegment
-      ? previousSegment.points[previousSegment.points.length - 1].y
-      : null;
-
-    // Générer les points du terrain
     for (let i = 0; i < nbPoints; i++) {
       const x = startX + (i / (nbPoints - 1)) * this.segmentWidth;
-      let y;
-      let isGap = false;
+      const normalizedX = i / (nbPoints - 1);
 
-      // Appliquer une transition spéciale pour le premier point du segment
-      if (i === 0 && previousEndHeight !== null) {
-        // On force le premier point à correspondre au dernier point du segment précédent
-        y = previousEndHeight;
-      } else {
-        switch (chunkType) {
-          case 'hills':
-            y = this.generateHills(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-            break;
-          case 'plateau':
-            y = this.generatePlateau(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-            break;
-          case 'gap':
-            y = this.generateGap(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-            if (y === null) isGap = true;
-            break;
-          case 'ramp':
-            y = this.generateRamp(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-            break;
-          case 'washboard':
-            y = this.generateWashboard(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-            break;
-          case 'valley':
-            y = this.generateValley(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-            break;
-          default:
-            y = this.generateHills(
-              x,
-              startX,
-              startX + this.segmentWidth,
-              Math.min(0.1 + segmentIndex * 0.01, 0.9)
-            );
-        }
+      // Vérifier si c'est un gap (trou) - plus probable avec difficulté élevée
+      const isGap =
+        chunkType === 'gap' && normalizedX > 0.3 && normalizedX < 0.7;
+
+      // Générer la hauteur en fonction du type de chunk
+      let y = 0;
+
+      switch (chunkType) {
+        case 'hills':
+          y = this.generateHills(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
+          break;
+        case 'plateau':
+          y = this.generatePlateau(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
+          break;
+        case 'ramp':
+          y = this.generateRamp(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
+          break;
+        case 'gap':
+          y = this.generateGap(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
+          break;
+        case 'washboard':
+          y = this.generateWashboard(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
+          break;
+        case 'valley':
+          y = this.generateValley(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
+          break;
+        default:
+          y = this.generateHills(
+            x,
+            startX,
+            startX + this.segmentWidth,
+            difficulty
+          );
       }
 
-      // Si nous sommes près du début du segment, lisser la transition
-      // Cela assure une connexion propre avec le segment précédent
+      // Lisser les transitions près du début du segment
       if (i > 0 && i < 5 && previousEndHeight !== null) {
         const blendFactor = 1 - this.quinticInterpolation(i / 5);
         const generatedY = y;
-        // Interpoler entre la hauteur idéale pour la jonction et la hauteur générée
         y = previousEndHeight * blendFactor + generatedY * (1 - blendFactor);
       }
 
-      // Stocker si c'est un trou pour la physique
       points.push({
         x,
-        y: isGap ? -24 : y, // Utiliser une valeur très basse pour la visualisation des trous
-        height: isGap ? null : y, // Marquer les trous avec null
+        y: isGap ? -24 : y,
+        height: isGap ? null : y,
       });
     }
 
     // Post-processing pour lisser les transitions internes du segment
     this.smoothSegmentPoints(points);
 
-    // Créer la géométrie du terrain
+    // Créer trois parties du terrain : bordure gauche, zone centrale, bordure droite
+    const terrainMeshes = [];
+    const terrainBodies = [];
+
+    // Créer le maillage pour la zone centrale (avec collisions)
+    const centralMesh = this.createTerrainMeshPart(
+      points,
+      -this.terrainConfig.central.width / 2, // Centrer par rapport à z=0
+      this.terrainConfig.central.width, // Largeur zone centrale
+      this.terrainMaterial,
+      'central'
+    );
+    terrainMeshes.push(centralMesh);
+
+    // Créer la bordure gauche (sans collision)
+    const leftBorderMesh = this.createTerrainMeshPart(
+      points,
+      -this.terrainConfig.central.width / 2 - this.terrainConfig.borders.width,
+      this.terrainConfig.borders.width,
+      this.borderMaterial,
+      'left'
+    );
+    terrainMeshes.push(leftBorderMesh);
+
+    // Créer la bordure droite (sans collision)
+    const rightBorderMesh = this.createTerrainMeshPart(
+      points,
+      this.terrainConfig.central.width / 2,
+      this.terrainConfig.borders.width,
+      this.borderMaterial,
+      'right'
+    );
+    terrainMeshes.push(rightBorderMesh);
+
+    // Ajouter les meshes à la scène
+    terrainMeshes.forEach((mesh) => {
+      // S'assurer que le maillage n'est pas déjà dans la scène
+      if (!mesh.parent) {
+        this.scene.add(mesh);
+      }
+    });
+
+    // Créer les corps physiques uniquement pour la zone centrale
+    this.createPhysicsForSegment(points, terrainBodies, chunkType);
+
+    // Créer le segment complet avec toutes ses propriétés
+    const segment = {
+      startX: startX,
+      meshes: terrainMeshes,
+      bodies: terrainBodies,
+      points: points,
+      chunkType: chunkType,
+      decorations: [],
+    };
+
+    // Toujours ajouter des décorations pour un look uniforme
+    this.addTerrainDecorations(startX, points, chunkType, segment.decorations);
+
+    // Ajouter le segment à la liste
+    this.terrainMeshes.push(segment);
+
+    return segment;
+  }
+
+  // Méthode pour créer une partie du maillage du terrain
+  createTerrainMeshPart(points, zOffset, width, material, partType) {
+    // Créer la forme 2D du terrain
     const terrainShape = new THREE.Shape();
     const initialHeight = points[0].y;
 
@@ -899,7 +1260,7 @@ export default class Terrain {
     // Extruder la forme pour créer un volume 3D
     const extrudeSettings = {
       steps: 1,
-      depth: this.segmentDepth,
+      depth: width,
       bevelEnabled: false,
     };
 
@@ -908,155 +1269,250 @@ export default class Terrain {
       extrudeSettings
     );
 
-    // Utiliser une couleur différente selon le type de terrain
-    let terrainColor;
-    switch (chunkType) {
-      case 'hills':
-        terrainColor = 0x556b2f; // Vert olive
-        break;
-      case 'plateau':
-        terrainColor = 0x228b22; // Vert forêt
-        break;
-      case 'gap':
-        terrainColor = 0x8b4513; // Marron
-        break;
-      case 'ramp':
-        terrainColor = 0x698269; // Vert gris
-        break;
-      case 'washboard':
-        terrainColor = 0x6b8e23; // Vert olive foncé
-        break;
-      case 'valley':
-        terrainColor = 0x4b543b; // Vert grisâtre
-        break;
-      default:
-        terrainColor = 0x556b2f; // Vert olive par défaut
-    }
+    // Utiliser le bon matériau en fonction du type de partie
+    const meshMaterial =
+      partType === 'central' ? this.terrainMaterial : this.borderMaterial;
 
-    const terrainMaterial = new THREE.MeshStandardMaterial({
-      color: terrainColor,
-      roughness: 0.8,
-      metalness: 0.2,
-      side: THREE.DoubleSide,
-    });
+    // S'assurer que le matériau est correctement configuré
+    meshMaterial.wireframe = false;
+    meshMaterial.side = THREE.DoubleSide;
+    meshMaterial.needsUpdate = true;
 
-    const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
+    // Créer le mesh avec le matériau correspondant
+    const terrainMesh = new THREE.Mesh(terrainGeometry, meshMaterial.clone());
     terrainMesh.castShadow = true;
     terrainMesh.receiveShadow = true;
-    terrainMesh.position.z = -this.segmentDepth / 2;
-    terrainMesh.position.y = 1;
-    this.scene.add(terrainMesh);
 
-    // Créer les corps physiques pour le terrain
-    const terrainBodies = [];
+    // Positionner la partie du terrain
+    terrainMesh.position.z = zOffset;
 
-    // Identifier les zones de trou pour traitement spécial
-    let gapRanges = [];
-    let currentGapStart = null;
+    // Ajouter des métadonnées pour faciliter l'identification
+    terrainMesh.userData = {
+      type: 'terrain',
+      part: partType,
+      hasCollision: partType === 'central',
+    };
 
-    for (let i = 0; i < points.length; i++) {
-      if (points[i].height === null && currentGapStart === null) {
-        // Début d'un trou
-        currentGapStart = i;
-      } else if (points[i].height !== null && currentGapStart !== null) {
-        // Fin d'un trou
-        gapRanges.push({
-          start: currentGapStart,
-          end: i - 1,
-        });
-        currentGapStart = null;
-      }
-    }
+    return terrainMesh;
+  }
 
-    // Si un trou finit à la fin du segment
-    if (currentGapStart !== null) {
-      gapRanges.push({
-        start: currentGapStart,
-        end: points.length - 1,
+  // Nouvelle méthode pour créer la physique uniquement pour la zone centrale
+  createPhysicsForSegment(points, bodiesArray, chunkType) {
+    // Utiliser les paramètres de simplification
+    const skipMinorSegments =
+      TERRAIN_CONFIG.PHYSICS_SIMPLIFICATION.SKIP_MINOR_SEGMENTS;
+    const segmentStep = TERRAIN_CONFIG.PHYSICS_SIMPLIFICATION.SEGMENT_STEP || 1;
+
+    // Déterminer la rigidité du segment en fonction du type de chunk
+    const rigidityMultiplier = this.getSegmentRigidity(chunkType);
+
+    // Créer les barrières latérales avec rigidité personnalisée
+    this.createSideBarriers(points, bodiesArray, rigidityMultiplier);
+
+    // Créer les segments de physique avec simplification
+    this.createPhysicsSegment(
+      points,
+      bodiesArray,
+      segmentStep,
+      skipMinorSegments
+    );
+
+    // Créer les collisions d'arrière-plan
+    this.createBackgroundPhysics(points, bodiesArray, rigidityMultiplier);
+  }
+
+  // Créer des barrières latérales pour empêcher le véhicule de sortir du monde
+  createSideBarriers(points, bodiesArray, rigidityMultiplier) {
+    if (!points || points.length < 2) return;
+
+    const startX = points[0].x;
+    const endX = points[points.length - 1].x;
+    const segmentLength = endX - startX;
+
+    // Propriétés pour les barrières latérales
+    const barrierHeight = 15; // Hauteur augmentée
+    const barrierThickness = 1;
+
+    // Créer les barrières latérales (gauche et droite)
+    [-1, 1].forEach((side) => {
+      const zOffset =
+        side *
+        (this.terrainConfig.central.width / 2 +
+          this.terrainConfig.borders.width / 2);
+
+      // Hauteur moyenne des points pour placer la barrière
+      let avgHeight = 0;
+      points.forEach((point) => {
+        if (point.height !== null) {
+          avgHeight += point.height;
+        }
       });
-    }
+      avgHeight /= points.filter((p) => p.height !== null).length;
 
-    // Ne pas créer de corps physiques pour les parties en trou
-    let currentSegmentStart = 0;
+      // Créer un corps rigide CANNON pour la barrière
+      const barrierShape = new CANNON.Box(
+        new CANNON.Vec3(
+          segmentLength / 2,
+          barrierHeight / 2,
+          barrierThickness / 2
+        )
+      );
 
-    // Traiter chaque section entre les trous
-    for (const gap of gapRanges) {
-      if (currentSegmentStart < gap.start) {
-        // Créer un segment avant le trou
-        this.createPhysicsSegment(
-          points.slice(currentSegmentStart, gap.start),
-          terrainBodies
+      const barrierBody = new CANNON.Body({
+        mass: 0, // Statique
+        position: new CANNON.Vec3(
+          startX + segmentLength / 2,
+          avgHeight + barrierHeight / 2,
+          zOffset
+        ),
+        shape: barrierShape,
+        material: this.terrainMaterial,
+      });
+
+      // Renforcer la friction
+      barrierBody.material = this.terrainMaterial;
+      barrierBody.collisionFilterGroup = COLLISION_GROUPS.TERRAIN;
+      barrierBody.collisionFilterMask =
+        COLLISION_GROUPS.VEHICLE | COLLISION_GROUPS.WHEELS;
+
+      // Ajouter au monde physique
+      this.physicsWorld.addBody(barrierBody);
+      bodiesArray.push(barrierBody);
+
+      // Option: Visualiser les barrières en mode debug
+      if (DEBUG.SHOW_PHYSICS) {
+        const barrierMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(segmentLength, barrierHeight, barrierThickness),
+          new THREE.MeshBasicMaterial({
+            color: 0xff0000,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.3,
+          })
         );
+        barrierMesh.position.set(
+          startX + segmentLength / 2,
+          avgHeight + barrierHeight / 2,
+          zOffset
+        );
+        this.scene.add(barrierMesh);
       }
-
-      // Ajouter une barrière invisible au fond du trou (-34) pour éviter de tomber infiniment
-      this.createBottomBarrier(
-        points[gap.start].x,
-        points[gap.end].x,
-        terrainBodies
-      );
-
-      currentSegmentStart = gap.end + 1;
-    }
-
-    // Créer le dernier segment après le dernier trou
-    if (currentSegmentStart < points.length) {
-      this.createPhysicsSegment(
-        points.slice(currentSegmentStart),
-        terrainBodies
-      );
-    }
-
-    // Si pas de trous, créer un seul segment physique
-    if (gapRanges.length === 0) {
-      this.createPhysicsSegment(points, terrainBodies);
-    }
-
-    // Ajouter des décorations en fonction du type de terrain
-    const decorations = [];
-
-    switch (chunkType) {
-      case 'ramp':
-        const arrowGeometry = new THREE.ConeGeometry(0.5, 2, 8);
-        const arrowMaterial = new THREE.MeshStandardMaterial({
-          color: 0xff0000,
-        });
-        const arrow = new THREE.Mesh(arrowGeometry, arrowMaterial);
-
-        const rampCenter = startX + this.segmentWidth / 2;
-        const rampHeight = this.getTerrainHeightAt(rampCenter);
-        arrow.position.set(rampCenter, rampHeight + 3, 0);
-        arrow.rotation.z = -Math.PI / 2;
-        this.scene.add(arrow);
-        decorations.push(arrow);
-        break;
-
-      case 'gap':
-        const skullGeometry = new THREE.SphereGeometry(0.5, 8, 8);
-        const skullMaterial = new THREE.MeshStandardMaterial({
-          color: 0xffffff,
-        });
-
-        const gapCenter = startX + this.segmentWidth / 2;
-        const gapStart = gapCenter - 4;
-        // Vérifier si on n'est pas juste avant un trou
-        const skullHeight = this.getTerrainHeightAt(gapStart - 1) || 0;
-
-        const skull = new THREE.Mesh(skullGeometry, skullMaterial);
-        skull.position.set(gapStart - 1, skullHeight + 1, 0);
-        this.scene.add(skull);
-        decorations.push(skull);
-        break;
-    }
-
-    this.terrainMeshes.push({
-      mesh: terrainMesh,
-      bodies: terrainBodies,
-      startX: startX,
-      points: points,
-      chunkType: chunkType,
-      decorations: decorations,
     });
+  }
+
+  // Créer des éléments physiques pour rendre l'arrière-plan plus solide
+  createBackgroundPhysics(points, bodiesArray, rigidityMultiplier) {
+    if (!points || points.length < 2) return;
+
+    try {
+      // Paramètres pour l'arrière-plan
+      const bgDepth = this.terrainConfig.borders.width * 2; // Profondeur du terrain d'arrière-plan
+      const startX = points[0].x;
+      const endX = points[points.length - 1].x;
+      const segmentLength = endX - startX;
+
+      // Créer des éléments physiques pour l'arrière-plan à gauche et à droite
+      [-1, 1].forEach((side) => {
+        // Base z position (middle of the background area)
+        const baseZ =
+          side *
+          (this.terrainConfig.central.width / 2 +
+            this.terrainConfig.borders.width / 2);
+
+        // Définir plusieurs niveaux de profondeur pour l'arrière-plan
+        const depthLevels = [0.3, 0.7, 1.0];
+
+        depthLevels.forEach((depthFactor) => {
+          // Z position adjusted by depth factor
+          const zOffset = baseZ * depthFactor;
+
+          // Sous-diviser le segment pour un meilleur rendu de l'arrière-plan
+          const subsegments = 3; // Nombre de sous-segments
+          const subsegmentLength = segmentLength / subsegments;
+
+          for (let i = 0; i < subsegments; i++) {
+            // Position X du sous-segment
+            const subsegmentX = startX + i * subsegmentLength;
+
+            // Trouver les points correspondants dans le tableau de points
+            const startIdx = Math.floor((i * points.length) / subsegments);
+            const endIdx = Math.floor(((i + 1) * points.length) / subsegments);
+
+            // Calculer la hauteur moyenne de ce sous-segment
+            let avgHeight = 0;
+            let count = 0;
+            for (let j = startIdx; j < endIdx; j++) {
+              if (points[j] && points[j].height !== null) {
+                avgHeight += points[j].height;
+                count++;
+              }
+            }
+
+            if (count > 0) {
+              avgHeight /= count;
+
+              // Ajouter une variation selon la profondeur
+              const heightVariation =
+                (1 - depthFactor) * 5 * (this.seededRandom() * 2 - 1);
+              avgHeight += heightVariation;
+
+              // Créer un corps pour ce sous-segment d'arrière-plan
+              const bgBodyShape = new CANNON.Box(
+                new CANNON.Vec3(
+                  subsegmentLength / 2,
+                  5, // Hauteur
+                  bgDepth / depthLevels.length / 2 // Épaisseur basée sur le niveau de profondeur
+                )
+              );
+
+              const bgBody = new CANNON.Body({
+                mass: 0, // Statique
+                position: new CANNON.Vec3(
+                  subsegmentX + subsegmentLength / 2,
+                  avgHeight + 2, // Légèrement au-dessus du sol
+                  zOffset
+                ),
+                shape: bgBodyShape,
+                material: this.terrainMaterial,
+              });
+
+              // Configurer la collision
+              bgBody.collisionFilterGroup = COLLISION_GROUPS.TERRAIN;
+              bgBody.collisionFilterMask =
+                COLLISION_GROUPS.VEHICLE | COLLISION_GROUPS.WHEELS;
+
+              // Ajouter au monde physique
+              this.physicsWorld.addBody(bgBody);
+              bodiesArray.push(bgBody);
+
+              // Visualiser en mode debug
+              if (DEBUG.SHOW_PHYSICS) {
+                const bgMesh = new THREE.Mesh(
+                  new THREE.BoxGeometry(
+                    subsegmentLength,
+                    10,
+                    bgDepth / depthLevels.length
+                  ),
+                  new THREE.MeshBasicMaterial({
+                    color: 0x00ff00,
+                    wireframe: true,
+                    transparent: true,
+                    opacity: 0.2,
+                  })
+                );
+                bgMesh.position.copy(bgBody.position);
+                this.scene.add(bgMesh);
+              }
+            }
+          }
+        });
+      });
+    } catch (error) {
+      console.error(
+        "Erreur lors de la création de la physique d'arrière-plan:",
+        error
+      );
+    }
   }
 
   // Nouvelle méthode pour créer une barrière au fond des trous
@@ -1084,39 +1540,55 @@ export default class Terrain {
   }
 
   // Créer un segment de physique pour le terrain
-  createPhysicsSegment(points, bodiesArray) {
-    // Ignorer les segments vides
-    if (!points || points.length < 2) return;
+  createPhysicsSegment(
+    points,
+    bodiesArray,
+    segmentStep = 1,
+    skipMinorSegments = false
+  ) {
+    const groundMaterial = this.groundMaterial;
 
-    for (let i = 0; i < points.length - 1; i++) {
+    // Parcourir les points du segment avec le pas de simplification
+    for (let i = 0; i < points.length - 1; i += segmentStep) {
       const p1 = points[i];
-      const p2 = points[i + 1];
+      const p2 = points[Math.min(i + segmentStep, points.length - 1)];
 
-      // Ignorer les points de trou
-      if (p1.height === null || p2.height === null) continue;
+      // Calculer la longueur du segment
+      const segmentLength = Math.abs(p2.x - p1.x);
 
-      const width = p2.x - p1.x;
-      // Utiliser les positions d'origine sans décalage
-      const midX = (p1.x + p2.x) / 2;
-      const midY = (p1.y + p2.y) / 2;
+      // Ignorer les petits segments si l'option est activée
+      if (skipMinorSegments && segmentLength < 0.5) {
+        continue;
+      }
+
+      // Créer un corps pour ce segment de terrain
+      const width = segmentLength;
+      const height = 1;
+
+      // Position et rotation du segment
       const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+      const cx = (p2.x + p1.x) / 2;
+      const cy = (p2.y + p1.y) / 2;
 
-      // Créer une boîte pour représenter ce segment
+      // Créer la forme physique - un rectangle
       const segmentShape = new CANNON.Box(
-        new CANNON.Vec3(width / 2, 1, this.segmentDepth / 2)
+        new CANNON.Vec3(width / 2, height / 2, 100)
       );
 
+      // Créer le corps physique
       const segmentBody = new CANNON.Body({
         mass: 0,
-        material: this.groundMaterial,
-        collisionFilterGroup: 1,
-        collisionFilterMask: 1,
+        position: new CANNON.Vec3(cx, cy - height / 2, 0),
+        material: groundMaterial,
       });
 
+      // Ajouter la forme au corps
       segmentBody.addShape(segmentShape);
-      segmentBody.position.set(midX, midY, 0);
+
+      // Appliquer la rotation
       segmentBody.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), angle);
 
+      // Ajouter au monde physique
       this.physicsWorld.addBody(segmentBody);
       bodiesArray.push(segmentBody);
     }
@@ -1143,12 +1615,16 @@ export default class Terrain {
         return;
       }
 
-      const currentChunkType =
-        this.terrainMeshes.find(
-          (segment) =>
-            segment.startX <= vehiclePosition.x &&
-            segment.startX + this.segmentWidth > vehiclePosition.x
-        )?.chunkType || 'hills';
+      // Déterminer le type de chunk actuel
+      const currentSegment = this.terrainMeshes.find(
+        (segment) =>
+          segment.startX <= vehiclePosition.x &&
+          segment.startX + this.segmentWidth > vehiclePosition.x
+      );
+
+      const currentChunkType = currentSegment
+        ? currentSegment.chunkType
+        : 'hills';
 
       // Vérifier les segments existants pour éviter les doublons
       // Créer un Set des startX des segments existants pour recherche rapide
@@ -1172,13 +1648,29 @@ export default class Terrain {
 
       this.terrainMeshes = uniqueSegments;
 
+      // Constantes pour la gestion des segments visibles
+      const segmentsAhead = TERRAIN_CONFIG.VISIBLE_CHUNKS_AHEAD || 5;
+      const segmentsBehind = TERRAIN_CONFIG.VISIBLE_CHUNKS_BEHIND || 5;
+
       // Générer de nouveaux segments si nécessaire
       try {
         // Augmenter la marge de génération anticipée pour éviter les vides
-        while (
-          this.terrainMeshes.length === 0 ||
-          currentSegmentIndex + 12 >= this.terrainMeshes.length // Augmenté de 8 à 12
-        ) {
+        // Utiliser un nombre fixe de segments visibles avant et après la position actuelle
+        while (true) {
+          const lastSegmentIndex =
+            this.terrainMeshes.length > 0
+              ? Math.floor(
+                  this.terrainMeshes[this.terrainMeshes.length - 1].startX /
+                    this.segmentWidth
+                )
+              : -1;
+
+          // Arrêter si nous avons assez de segments en avance
+          if (lastSegmentIndex >= currentSegmentIndex + segmentsAhead) {
+            break;
+          }
+
+          // Calculer la position du prochain segment
           let nextStartX = 0;
           if (this.terrainMeshes.length > 0) {
             const lastSegment =
@@ -1207,22 +1699,24 @@ export default class Terrain {
 
       // Supprimer les segments trop éloignés mais en garder plus derrière le joueur
       try {
-        // Augmenter le nombre minimum de segments à conserver
-        const minSegmentsToKeep = 25; // Augmenté de 15 à 25
-
-        // Ne supprimer les segments que s'il y en a beaucoup et que le joueur est loin du début
-        // Cela devrait empêcher la suppression trop agressive des segments
+        // Ne supprimer que s'il y a assez de segments et que le joueur est suffisamment avancé
         while (
-          this.terrainMeshes.length > minSegmentsToKeep &&
-          currentSegmentIndex > 10 && // Augmenté de 7 à 10
-          this.terrainMeshes[0].startX + this.segmentWidth * 15 <
-            vehiclePosition.x // Ajouté: Ne supprimer que les segments très loin derrière
+          this.terrainMeshes.length > segmentsAhead + segmentsBehind &&
+          currentSegmentIndex > segmentsBehind
         ) {
-          const oldSegment = this.terrainMeshes.shift();
-          if (oldSegment) {
-            this.removeSegment(oldSegment);
-            // Supprimer du Set aussi
-            existingSegmentsStartX.delete(oldSegment.startX);
+          // Obtenir le segment le plus en arrière
+          const firstSegment = this.terrainMeshes[0];
+          const firstSegmentIndex = Math.floor(
+            firstSegment.startX / this.segmentWidth
+          );
+
+          // Ne supprimer que si ce segment est suffisamment derrière le joueur
+          if (firstSegmentIndex < currentSegmentIndex - segmentsBehind) {
+            this.removeSegment(firstSegment);
+            this.terrainMeshes.shift();
+            existingSegmentsStartX.delete(firstSegment.startX);
+          } else {
+            break;
           }
         }
       } catch (error) {
@@ -1253,10 +1747,45 @@ export default class Terrain {
         }
       }
 
+      // Appliquer le LOD en fonction de la distance au joueur
+      this.applyLODToSegments(vehiclePosition);
+
       // Mettre à jour l'affichage des infos du terrain
       this.updateTerrainInfo(currentSegmentIndex, currentChunkType);
     } catch (error) {
       console.error('Erreur générale dans la mise à jour du terrain:', error);
+    }
+  }
+
+  // Applique le LOD à tous les segments en fonction de leur distance au joueur
+  applyLODToSegments(vehiclePosition) {
+    if (!vehiclePosition) {
+      console.warn(
+        'Position du véhicule non disponible pour applyLODToSegments'
+      );
+      return;
+    }
+
+    // Vérifier que lodDistances est défini
+    const lodDistances = TERRAIN_CONFIG.LOD_DISTANCES || {
+      HIGH: 100,
+      MEDIUM: 200,
+      LOW: 400,
+    };
+
+    try {
+      this.terrainMeshes.forEach((segment) => {
+        if (!segment) return;
+
+        // Calculer la distance entre le segment et le joueur
+        const segmentCenterX = segment.startX + this.segmentWidth / 2;
+        const distanceFromPlayer = Math.abs(segmentCenterX - vehiclePosition.x);
+
+        // Appliquer le LOD en fonction de la distance
+        this.applyLOD(segment, distanceFromPlayer, false, vehiclePosition);
+      });
+    } catch (error) {
+      console.error("Erreur lors de l'application du LOD:", error);
     }
   }
 
@@ -1282,37 +1811,50 @@ export default class Terrain {
         });
       }
 
-      // Supprimer le mesh visuel
-      if (segment.mesh) {
-        if (this.scene) {
-          this.scene.remove(segment.mesh);
-        }
-
-        if (segment.mesh.geometry) {
-          segment.mesh.geometry.dispose();
-        }
-
-        if (segment.mesh.material) {
-          if (Array.isArray(segment.mesh.material)) {
-            segment.mesh.material.forEach((material) => material.dispose());
-          } else {
-            segment.mesh.material.dispose();
+      // Supprimer les meshes visuels (plusieurs parties maintenant)
+      if (segment.meshes && Array.isArray(segment.meshes)) {
+        segment.meshes.forEach((mesh) => {
+          if (this.scene) {
+            this.scene.remove(mesh);
           }
-        }
+
+          if (mesh.geometry) {
+            mesh.geometry.dispose();
+          }
+
+          if (mesh.material) {
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach((material) => material.dispose());
+            } else {
+              mesh.material.dispose();
+            }
+          }
+        });
       }
 
       // Supprimer les décorations
       if (segment.decorations && Array.isArray(segment.decorations)) {
         segment.decorations.forEach((decoration) => {
-          if (this.scene && decoration) {
-            this.scene.remove(decoration);
-          }
-          if (decoration && decoration.geometry) decoration.geometry.dispose();
-          if (decoration && decoration.material) {
-            if (Array.isArray(decoration.material)) {
-              decoration.material.forEach((m) => m.dispose());
+          if (decoration && decoration.mesh) {
+            if (this.scene) {
+              this.scene.remove(decoration.mesh);
+            }
+
+            // Retourner la décoration à son pool si possible
+            if (decoration.type && this.objectPools[decoration.type]) {
+              this.returnToPool(decoration.type, decoration.mesh);
             } else {
-              decoration.material.dispose();
+              // Sinon, nettoyer les ressources
+              if (decoration.mesh.geometry) {
+                decoration.mesh.geometry.dispose();
+              }
+              if (decoration.mesh.material) {
+                if (Array.isArray(decoration.mesh.material)) {
+                  decoration.mesh.material.forEach((m) => m.dispose());
+                } else {
+                  decoration.mesh.material.dispose();
+                }
+              }
             }
           }
         });
@@ -1322,54 +1864,69 @@ export default class Terrain {
     }
   }
 
-  // Mise à jour de l'affichage des informations sur le terrain
+  // Mise à jour de l'affichage d'information sur le terrain
   updateTerrainInfo(currentSegmentIndex, currentChunkType) {
-    const infoExists = document.querySelector('.terrain-info');
-    if (infoExists) infoExists.remove();
+    // Création ou mise à jour de l'élément d'affichage
+    let terrainInfo = document.querySelector('.terrain-info');
 
-    const terrainInfo = document.createElement('div');
-    terrainInfo.className = 'terrain-info';
+    if (!terrainInfo) {
+      terrainInfo = document.createElement('div');
+      terrainInfo.className = 'terrain-info';
+      terrainInfo.style.cssText = `
+        position: absolute;
+        bottom: 20px;
+        left: 20px;
+        background: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 10px 15px;
+        border-radius: 5px;
+        font-family: 'Arial', sans-serif;
+        font-size: 16px;
+        z-index: 1000;
+      `;
+      document.body.appendChild(terrainInfo);
+    }
 
-    let terrainName, terrainColor;
+    // Obtenir la difficulté en fonction de la position
+    const difficulty = Math.min(0.1 + currentSegmentIndex * 0.01, 0.9);
+    const difficultyPercent = Math.floor(difficulty * 100);
+
+    // Déterminer le nom et la couleur du type de terrain actuel
+    let terrainName = 'Standard';
+    let terrainColor = '#FFFFFF';
+
     switch (currentChunkType) {
-      case 'hills':
+      case 'hill':
         terrainName = 'Collines';
-        terrainColor = '#556b2f';
+        terrainColor = '#4CAF50';
         break;
       case 'plateau':
         terrainName = 'Plateau';
-        terrainColor = '#6a994e';
-        break;
-      case 'gap':
-        terrainName = 'Trou';
-        terrainColor = '#3a5a40';
-        break;
-      case 'ramp':
-        terrainName = 'Rampe';
-        terrainColor = '#8c8c8c';
-        break;
-      case 'washboard':
-        terrainName = 'Bosses';
-        terrainColor = '#bca76a';
+        terrainColor = '#2196F3';
         break;
       case 'valley':
         terrainName = 'Vallée';
-        terrainColor = '#4b543b';
+        terrainColor = '#9C27B0';
+        break;
+      case 'ramp':
+        terrainName = 'Rampe';
+        terrainColor = '#FF9800';
+        break;
+      case 'gap':
+        terrainName = 'Trou';
+        terrainColor = '#F44336';
+        break;
+      case 'washboard':
+        terrainName = 'Ondulations';
+        terrainColor = '#FFEB3B';
         break;
       default:
-        terrainName = 'Terrain';
-        terrainColor = '#556b2f';
+        terrainName = 'Standard';
+        terrainColor = '#FFFFFF';
     }
 
-    const currentDifficulty = Math.min(0.1 + currentSegmentIndex * 0.01, 0.9);
-    const difficultyPercent = Math.round(currentDifficulty * 100);
-
+    // Mise à jour du contenu
     terrainInfo.innerHTML = `<span style="color:${terrainColor}">Terrain: ${terrainName}</span> - Difficulté: ${difficultyPercent}%`;
-    terrainInfo.style.cssText =
-      'position:absolute; bottom:70px; left:10px; background:rgba(0,0,0,0.7); color:white; padding:5px 10px; border-radius:3px; font-family:sans-serif;';
-
-    document.body.appendChild(terrainInfo);
-    this.infoElement = terrainInfo;
   }
 
   // Nettoyage des ressources lors de la destruction
@@ -1397,342 +1954,602 @@ export default class Terrain {
 
   // Création d'un rocher décoratif
   createRockDecoration(x, y, segmentType) {
-    // Vérifier si nous avons un rocher disponible dans le pool
-    let rockMesh = null;
+    try {
+      // Vérifier que le pool est initialisé
+      if (!this.objectPools) {
+        this.objectPools = { rock: [], tree: [], sign: [] };
+      }
 
-    // Fonction de création d'un nouveau rocher
-    const createRockMesh = () => {
-      // Choisir aléatoirement une taille de rocher
-      const sizeIndex = Math.floor(
-        this.seededRandom() * this.sharedGeometries.rock.length
-      );
-      const rockSize = this.seededRandom() * 0.5 + 0.5; // Échelle entre 0.5 et 1.0
+      let rockMesh;
 
-      // Créer le mesh du rocher
-      const rock = new THREE.Mesh(
-        this.sharedGeometries.rock[sizeIndex],
-        this.sharedMaterials.rock
-      );
+      // Obtenir un rocher du pool ou en créer un nouveau
+      if (this.objectPools.rock && this.objectPools.rock.length > 0) {
+        rockMesh = this.objectPools.rock.pop();
+      } else {
+        // Créer un nouveau rocher
+        const rockIndex = Math.floor(Math.random() * 3);
+        const rockGeometry = this.sharedGeometries.rock[rockIndex];
 
-      // Appliquer une échelle légèrement aléatoire
-      rock.scale.set(rockSize, rockSize * 0.8, rockSize);
+        if (!rockGeometry) {
+          console.warn(
+            "Géométrie de rocher non disponible, création d'une nouvelle"
+          );
+          const fallbackGeometry = new THREE.DodecahedronGeometry(0.7, 0);
+          rockMesh = new THREE.Mesh(
+            fallbackGeometry,
+            new THREE.MeshStandardMaterial({
+              color: 0x888888,
+              roughness: 0.9,
+              metalness: 0.1,
+            })
+          );
+        } else {
+          rockMesh = new THREE.Mesh(rockGeometry, this.sharedMaterials.rock);
+        }
 
-      // Ajouter de légères rotations aléatoires pour plus de variété
-      rock.rotation.x = this.seededRandom() * Math.PI;
-      rock.rotation.z = this.seededRandom() * Math.PI;
+        rockMesh.castShadow = true;
+        rockMesh.receiveShadow = true;
+        rockMesh.userData = { type: DECORATION_TYPES.ROCK };
+        this.scene.add(rockMesh);
+      }
 
-      rock.castShadow = true;
-      rock.receiveShadow = true;
+      // Positionner le rocher
+      rockMesh.position.set(x, y + 0.5, (Math.random() - 0.5) * 3);
+      rockMesh.visible = true;
 
-      return rock;
-    };
+      // Ajuster légèrement la taille et la rotation à chaque utilisation
+      const scale = Math.random() * 0.4 + 0.8;
+      rockMesh.scale.set(scale, scale, scale);
 
-    // Obtenir un rocher du pool ou en créer un nouveau
-    rockMesh = this.getFromPool(DECORATION_TYPES.ROCK, createRockMesh);
+      // Rotations aléatoires
+      rockMesh.rotation.x = Math.random() * Math.PI;
+      rockMesh.rotation.y = Math.random() * Math.PI * 2;
+      rockMesh.rotation.z = Math.random() * Math.PI;
 
-    // Positionner le rocher correctement sur le terrain
-    rockMesh.position.set(
-      x + (this.seededRandom() - 0.5) * 2, // Légère variation en X
-      y + rockMesh.scale.y / 2, // Placer sur le terrain
-      (this.seededRandom() - 0.5) * 4 // Position Z aléatoire
-    );
-
-    // Adapter la taille et la position en fonction du type de terrain
-    if (segmentType === 'ramp') {
-      // Éviter les rochers sur les rampes, les placer aux bords
-      rockMesh.position.x += this.seededRandom() > 0.5 ? 2 : -2;
-    } else if (segmentType === 'washboard') {
-      // Rochers plus petits sur les washboards
-      rockMesh.scale.multiplyScalar(0.7);
+      return { mesh: rockMesh, type: DECORATION_TYPES.ROCK };
+    } catch (error) {
+      console.error("Erreur lors de la création d'un rocher:", error);
+      return { mesh: null, type: DECORATION_TYPES.ROCK };
     }
-
-    this.scene.add(rockMesh);
-    return rockMesh;
   }
 
   // Création d'un arbre décoratif
   createTreeDecoration(x, y, segmentType) {
-    // Fonction de création d'un nouvel arbre
-    const createTreeGroup = () => {
-      const treeGroup = new THREE.Group();
+    try {
+      // Vérifier que le pool est initialisé
+      if (!this.objectPools) {
+        this.objectPools = { rock: [], tree: [], sign: [] };
+      }
 
-      // Taille de l'arbre et variations
-      const treeScale = this.seededRandom() * 0.5 + 0.8; // Échelle entre 0.8 et 1.3
+      let treeGroup;
 
-      // Créer le tronc
-      const trunk = new THREE.Mesh(
-        this.sharedGeometries.tree[0],
-        this.sharedMaterials.treeTrunk
-      );
-      trunk.castShadow = true;
+      // Obtenir un arbre du pool ou en créer un nouveau
+      if (this.objectPools.tree && this.objectPools.tree.length > 0) {
+        treeGroup = this.objectPools.tree.pop();
+      } else {
+        // Créer un nouvel arbre
+        treeGroup = new THREE.Group();
 
-      // Créer le feuillage
-      const foliage = new THREE.Mesh(
-        this.sharedGeometries.tree[1],
-        this.sharedMaterials.treeLeaves
-      );
-      foliage.position.y = 2.5; // Positionner le feuillage au-dessus du tronc
-      foliage.castShadow = true;
+        // S'assurer que les géométries sont disponibles
+        let trunkGeometry = this.sharedGeometries?.tree?.trunk;
+        let leavesGeometry = this.sharedGeometries?.tree?.leaves;
 
-      // Ajouter les composants à l'arbre
-      treeGroup.add(trunk);
-      treeGroup.add(foliage);
+        if (!trunkGeometry || !leavesGeometry) {
+          console.warn(
+            "Géométries d'arbre non disponibles, création de nouvelles"
+          );
+          trunkGeometry = new THREE.CylinderGeometry(0.2, 0.3, 2.0, 8);
+          leavesGeometry = new THREE.ConeGeometry(1.5, 3.0, 8);
+        }
 
-      // Appliquer l'échelle totale
-      treeGroup.scale.set(treeScale, treeScale, treeScale);
+        // S'assurer que les matériaux sont disponibles
+        let trunkMaterial = this.sharedMaterials?.tree?.trunk;
+        let leavesMaterial = this.sharedMaterials?.tree?.leaves;
 
-      // Légère rotation aléatoire pour plus de naturel
-      treeGroup.rotation.z = (this.seededRandom() - 0.5) * 0.2;
+        if (!trunkMaterial || !leavesMaterial) {
+          console.warn(
+            "Matériaux d'arbre non disponibles, création de nouveaux"
+          );
+          trunkMaterial = new THREE.MeshStandardMaterial({
+            color: 0x704214,
+            roughness: 0.9,
+            metalness: 0.0,
+          });
+          leavesMaterial = new THREE.MeshStandardMaterial({
+            color: 0x38761d,
+            roughness: 0.8,
+            metalness: 0.0,
+          });
+        }
 
-      return treeGroup;
-    };
+        // Tronc
+        const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+        trunk.castShadow = true;
+        trunk.receiveShadow = true;
+        trunk.position.y = 1.0;
+        treeGroup.add(trunk);
 
-    // Obtenir un arbre du pool ou en créer un nouveau
-    const tree = this.getFromPool(DECORATION_TYPES.TREE, createTreeGroup);
+        // Feuillage
+        const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+        leaves.castShadow = true;
+        leaves.receiveShadow = true;
+        leaves.position.y = 3.5;
+        treeGroup.add(leaves);
 
-    // Éviter de placer des arbres sur certains types de terrain
-    let offsetX = 0;
-    if (segmentType === 'ramp' || segmentType === 'gap') {
-      // Déplacer l'arbre vers les côtés pour les rampes et les trous
-      offsetX = this.seededRandom() > 0.5 ? 3 : -3;
+        treeGroup.userData = { type: DECORATION_TYPES.TREE };
+        this.scene.add(treeGroup);
+      }
+
+      // Positionner l'arbre
+      treeGroup.position.set(x, y, (Math.random() - 0.5) * 3);
+      treeGroup.visible = true;
+
+      // Ajuster légèrement la taille et la rotation à chaque utilisation
+      const scale = Math.random() * 0.3 + 0.8;
+      treeGroup.scale.set(scale, scale, scale);
+      treeGroup.rotation.y = Math.random() * Math.PI * 2;
+      treeGroup.rotation.z = (Math.random() - 0.5) * 0.2; // Légère inclinaison aléatoire
+
+      return { mesh: treeGroup, type: DECORATION_TYPES.TREE };
+    } catch (error) {
+      console.error("Erreur lors de la création d'un arbre:", error);
+      return { mesh: null, type: DECORATION_TYPES.TREE };
     }
-
-    // Positionner l'arbre correctement sur le terrain
-    tree.position.set(
-      x + offsetX + (this.seededRandom() - 0.5) * 3, // Variation en X
-      y, // Placer sur le terrain
-      (this.seededRandom() - 0.5) * 5 // Position Z aléatoire
-    );
-
-    this.scene.add(tree);
-    return tree;
   }
 
   // Création d'un panneau décoratif
   createSignDecoration(x, y, segmentType, distance) {
-    // Fonction de création d'un nouveau panneau
-    const createSignGroup = () => {
-      const signGroup = new THREE.Group();
+    // Obtenir un panneau du pool
+    if (
+      !this.objectPools ||
+      !this.objectPools.sign ||
+      this.objectPools.sign.length === 0
+    ) {
+      console.warn('Pool de panneaux non initialisé ou vide');
+      return { mesh: null, type: DECORATION_TYPES.SIGN };
+    }
 
-      // Créer le poteau
+    let signGroup;
+
+    if (this.objectPools.sign.length > 0) {
+      signGroup = this.objectPools.sign.pop();
+
+      // Mettre à jour le texte du panneau avec la distance
+      const textMesh = signGroup.children.find(
+        (child) => child.geometry && child.geometry.type === 'PlaneGeometry'
+      );
+
+      if (textMesh) {
+        // Mettre à jour le texte (simulation par couleur variable)
+        const distanceColor = Math.floor(Math.random() * 0xffffff);
+        textMesh.material.color.setHex(distanceColor);
+      }
+    } else {
+      // Créer un nouveau panneau si le pool est vide
+      signGroup = new THREE.Group();
+
+      // Poteau
       const post = new THREE.Mesh(
-        this.sharedGeometries.sign[0],
-        this.sharedMaterials.signPost
+        this.sharedGeometries.sign.post,
+        this.sharedMaterials.sign.post
       );
       post.castShadow = true;
-
-      // Créer le panneau
-      const panel = new THREE.Mesh(
-        this.sharedGeometries.sign[1],
-        this.sharedMaterials.signPanel
-      );
-      panel.position.y = 1.2; // Positionner au sommet du poteau
-      panel.castShadow = true;
-
-      // Ajouter les composants au panneau
+      post.receiveShadow = true;
+      post.position.y = 1.25;
       signGroup.add(post);
+
+      // Panneau
+      const panel = new THREE.Mesh(
+        this.sharedGeometries.sign.panel,
+        this.sharedMaterials.sign.panel
+      );
+      panel.castShadow = true;
+      panel.receiveShadow = true;
+      panel.position.y = 2.0;
       signGroup.add(panel);
 
-      // Ajouter des chiffres pour indiquer la distance
-      const textGeometry = new THREE.TextGeometry(distance.toString(), {
-        font: new THREE.Font({}), // Il faudrait charger une vraie police
-        size: 0.3,
-        height: 0.05,
-      });
+      // Texte
+      const text = new THREE.Mesh(
+        this.sharedGeometries.sign.text,
+        this.sharedMaterials.sign.text
+      );
+      text.position.y = 2.0;
+      text.position.z = 0.06;
+      signGroup.add(text);
 
-      return signGroup;
-    };
+      signGroup.userData = { type: DECORATION_TYPES.SIGN };
+      this.scene.add(signGroup);
+    }
 
-    // Obtenir un panneau du pool ou en créer un nouveau (géré différemment car contient du texte avec la distance)
-    // Dans un cas réel, on créerait une texture dynamique avec la distance
-    // Pour simplifier, on va juste créer un nouveau panneau à chaque fois
-    const sign = createSignGroup();
+    // Positionner le panneau
+    signGroup.position.set(x, y + 0.2, (Math.random() - 0.5) * 2);
+    signGroup.visible = true;
 
-    // Positionner le panneau sur le bord du terrain
-    sign.position.set(
-      x,
-      y + 0.5, // Légèrement au-dessus du sol
-      this.seededRandom() > 0.5 ? 3 : -3 // Alternance des côtés
-    );
+    // Orienter le panneau vers le joueur
+    signGroup.rotation.y = Math.PI / 2;
 
-    // Orientation du panneau vers la caméra
-    sign.rotation.y = sign.position.z > 0 ? Math.PI / 2 : -Math.PI / 2;
-
-    this.scene.add(sign);
-    return sign;
+    return { mesh: signGroup, type: DECORATION_TYPES.SIGN };
   }
 
-  // Ajout intelligent de décorations en fonction du type de terrain
+  // Ajouter des décorations au terrain
   addTerrainDecorations(startX, points, chunkType, decorations) {
-    // Nombre de décorations basé sur le type de terrain et la densité configurée
-    let decorationCount;
-    switch (chunkType) {
-      case 'hills':
-        decorationCount = Math.floor(this.seededRandom() * 3 + 1); // 1-3 décorations
-        break;
-      case 'plateau':
-        decorationCount = Math.floor(this.seededRandom() * 5 + 2); // 2-6 décorations
-        break;
-      case 'valley':
-        decorationCount = Math.floor(this.seededRandom() * 3 + 1); // 1-3 décorations
-        break;
-      case 'washboard':
-      case 'ramp':
-        decorationCount = 1; // Moins de décorations sur les obstacles
-        break;
-      case 'gap':
-        decorationCount = 0; // Pas de décorations sur les trous
-        break;
-      default:
-        decorationCount = Math.floor(this.seededRandom() * 2 + 1); // 1-2 décorations par défaut
-    }
-
-    // Ajuster en fonction de la densité configurée
-    decorationCount = Math.floor(
-      decorationCount * TERRAIN_CONFIG.DECORATION_DENSITY
-    );
-
-    // Positions possibles pour les décorations (éviter les bords)
-    const segmentPositions = [];
-    const step = this.segmentWidth / (decorationCount + 1);
-
-    for (let i = 1; i <= decorationCount; i++) {
-      segmentPositions.push(startX + step * i);
-    }
-
-    // Créer les décorations aux positions calculées
-    for (const x of segmentPositions) {
-      // Calculer la hauteur du terrain à cette position
-      const terrainHeight = this.getTerrainHeightAt(x);
-
-      // Ne pas placer de décorations sur les trous
-      if (terrainHeight === null) continue;
-
-      // Choisir un type de décoration en fonction du terrain et de l'aléatoire
-      const randomVal = this.seededRandom();
-
-      // Distance depuis le début, pour afficher sur les panneaux
-      const distance = Math.floor(x);
-
-      if (randomVal < 0.6) {
-        // 60% de chance d'avoir un rocher
-        const rock = this.createRockDecoration(x, terrainHeight, chunkType);
-        decorations.push(rock);
-      } else if (randomVal < 0.9) {
-        // 30% de chance d'avoir un arbre
-        const tree = this.createTreeDecoration(x, terrainHeight, chunkType);
-        decorations.push(tree);
-      } else {
-        // 10% de chance d'avoir un panneau
-        // Placer des panneaux tous les ~200 unités
-        if (distance % 200 < 20) {
-          const sign = this.createSignDecoration(
-            x,
-            terrainHeight,
-            chunkType,
-            distance
-          );
-          decorations.push(sign);
-        }
-      }
-    }
-
-    return decorations;
-  }
-
-  // Système de niveau de détail (LOD) pour les terrains éloignés
-  applyLOD(terrainSegment, distanceFromPlayer) {
-    // Ne pas modifier les segments très proches
-    if (distanceFromPlayer < TERRAIN_CONFIG.LOD_DISTANCES.HIGH) {
+    // Vérifier si le tableau decorations existe
+    if (!decorations) {
+      console.warn(
+        "Le tableau decorations n'existe pas pour le segment " + startX
+      );
       return;
     }
 
-    // Réduire la résolution des corps physiques pour les segments éloignés
-    if (terrainSegment.bodies && Array.isArray(terrainSegment.bodies)) {
-      // Niveau de détail moyen
-      if (distanceFromPlayer < TERRAIN_CONFIG.LOD_DISTANCES.MEDIUM) {
-        // Désactiver certains corps physiques pour réduire les calculs
-        const skipRate = 2; // Conserver 1 corps sur 2
+    try {
+      // Densité de base pour les décorations depuis la configuration
+      const baseDensity = TERRAIN_CONFIG.DECORATION_DENSITY;
 
-        for (let i = 0; i < terrainSegment.bodies.length; i++) {
-          if (i % skipRate !== 0 && terrainSegment.bodies[i]) {
-            terrainSegment.bodies[i].type = CANNON.Body.STATIC; // Moins de calculs de collision
+      const nbPoints = Math.min(points.length, 40);
+
+      // Points disponibles pour placement des décorations (éviter les extrémités)
+      const availablePoints = points.filter(
+        (p, i) => i > 2 && i < points.length - 3 && p.height !== null
+      );
+
+      // Points utilisés pour éviter les superpositions
+      const usedPositions = [];
+
+      // Fonction pour obtenir un point aléatoire
+      const getRandomPoint = () => {
+        if (availablePoints.length === 0) return null;
+        const index = Math.floor(this.seededRandom() * availablePoints.length);
+        return availablePoints[index];
+      };
+
+      // Vérifier si un espace est disponible pour une décoration
+      const isSpaceAvailable = (x, z, radius) => {
+        for (const pos of usedPositions) {
+          const distance = Math.sqrt(
+            Math.pow(pos.x - x, 2) + Math.pow(pos.z - z, 2)
+          );
+          if (distance < radius + pos.radius) {
+            return false;
           }
         }
-      }
-      // Niveau de détail bas (très éloigné)
-      else if (distanceFromPlayer < TERRAIN_CONFIG.LOD_DISTANCES.LOW) {
-        const skipRate = 4; // Conserver 1 corps sur 4
 
-        for (let i = 0; i < terrainSegment.bodies.length; i++) {
-          if (i % skipRate !== 0 && terrainSegment.bodies[i]) {
-            terrainSegment.bodies[i].type = CANNON.Body.STATIC;
-            // Simplifier les shapes également
-            terrainSegment.bodies[i].sleepSpeedLimit = 2.0; // S'endormir plus facilement
-          }
+        // Vérifier également la distance à l'axe Z (route centrale)
+        if (Math.abs(z) < 1.5 && chunkType !== 'plateau') {
+          return false; // Éviter de placer des décorations sur la route
         }
-      }
-      // Très loin (presque invisible)
-      else {
-        // Désactiver complètement la physique des segments très éloignés
-        for (let i = 0; i < terrainSegment.bodies.length; i++) {
-          if (terrainSegment.bodies[i]) {
-            terrainSegment.bodies[i].type = CANNON.Body.STATIC;
-            terrainSegment.bodies[i].sleep(); // Mettre en sommeil
-          }
-        }
-      }
-    }
 
-    // Simplifier les décorations pour les segments éloignés
-    if (
-      terrainSegment.decorations &&
-      Array.isArray(terrainSegment.decorations)
-    ) {
-      // Niveau de détail moyen
-      if (distanceFromPlayer < TERRAIN_CONFIG.LOD_DISTANCES.MEDIUM) {
-        // Réduire le niveau de détail visuel si possible
-        terrainSegment.decorations.forEach((decoration) => {
-          if (
-            decoration &&
-            decoration.userData &&
-            decoration.userData.lodLevel
-          ) {
-            decoration.userData.lodLevel = 1; // Niveau de détail moyen
-          }
-        });
+        return true;
+      };
+
+      // Définir les zones de placement des décorations avec des densités plus élevées
+      const zones = [
+        // Zone centrale (augmenter la densité)
+        {
+          zMin: -this.terrainConfig.central.width / 2,
+          zMax: this.terrainConfig.central.width / 2,
+          densityFactor: 0.3, // Réduit de 0.6 à 0.3 pour la zone centrale
+          decorTypes: ['rock'], // Principalement des rochers sur la route
+        },
+        // Zone de transition gauche (densité fortement augmentée)
+        {
+          zMin: -this.terrainConfig.central.width / 2 - 5,
+          zMax: -this.terrainConfig.central.width / 2,
+          densityFactor: 1.0, // Réduit de 1.5 à 1.0 pour les bords
+          decorTypes: ['rock', 'tree', 'sign'],
+        },
+        // Zone de transition droite (densité fortement augmentée)
+        {
+          zMin: this.terrainConfig.central.width / 2,
+          zMax: this.terrainConfig.central.width / 2 + 5,
+          densityFactor: 1.0, // Réduit de 1.5 à 1.0 pour les bords
+          decorTypes: ['rock', 'tree', 'sign'],
+        },
+        // Zone bordure gauche profonde (densité maximale)
+        {
+          zMin:
+            -this.terrainConfig.central.width / 2 -
+            this.terrainConfig.borders.width,
+          zMax: -this.terrainConfig.central.width / 2 - 5,
+          densityFactor: 2.0, // Réduit de 2.5 à 2.0
+          decorTypes: ['rock', 'tree'],
+        },
+        // Zone bordure droite profonde (densité maximale)
+        {
+          zMin: this.terrainConfig.central.width / 2 + 5,
+          zMax:
+            this.terrainConfig.central.width / 2 +
+            this.terrainConfig.borders.width,
+          densityFactor: 2.0, // Réduit de 2.5 à 2.0
+          decorTypes: ['rock', 'tree'],
+        },
+      ];
+
+      // Appliquer un multiplicateur de densité selon le type de terrain
+      let terrainMultiplier = 1.0;
+      switch (chunkType) {
+        case 'hills':
+          terrainMultiplier = 1.8; // Plus de décorations sur les collines
+          break;
+        case 'plateau':
+          terrainMultiplier = 1.5; // Un peu plus sur les plateaux
+          break;
+        case 'ramp':
+          terrainMultiplier = 0.8; // Moins sur les rampes, mais pas trop peu
+          break;
+        case 'washboard':
+          terrainMultiplier = 0.6; // Moins sur les washboards
+          break;
+        case 'valley':
+          terrainMultiplier = 1.0; // Normal dans les vallées
+          break;
+        default:
+          terrainMultiplier = 1.2; // Densité standard augmentée pour les autres types
       }
-      // Niveau de détail bas
-      else if (distanceFromPlayer < TERRAIN_CONFIG.LOD_DISTANCES.LOW) {
-        // Cacher certaines décorations mineures
-        terrainSegment.decorations.forEach((decoration) => {
-          if (decoration) {
-            if (
-              decoration.userData &&
-              decoration.userData.type === DECORATION_TYPES.ROCK
-            ) {
-              // Masquer les petits rochers
-              if (decoration.scale.x < 0.7) {
-                decoration.visible = false;
+
+      // Pour chaque zone, ajouter des décorations
+      zones.forEach((zone) => {
+        // Calculer le nombre de décorations pour chaque type dans la zone
+        const nbPoints = Math.min(points.length, 40);
+        const zoneWidth = zone.zMax - zone.zMin;
+
+        // Ajouter des rochers
+        if (zone.decorTypes.includes('rock')) {
+          const rockCount = Math.floor(
+            nbPoints *
+              baseDensity.ROCK *
+              zone.densityFactor *
+              terrainMultiplier *
+              (zoneWidth / 5)
+          );
+
+          for (let i = 0; i < rockCount; i++) {
+            const point = getRandomPoint();
+            if (!point) continue;
+
+            // Position avec variation aléatoire
+            const posX = point.x + (Math.random() - 0.5) * 3;
+            const posZ = zone.zMin + Math.random() * (zone.zMax - zone.zMin);
+
+            // Vérifier l'espace disponible
+            if (isSpaceAvailable(posX, posZ, 1.5)) {
+              const rockDecoration = this.createRockDecoration(
+                posX,
+                point.y,
+                chunkType
+              );
+              if (rockDecoration && rockDecoration.mesh) {
+                rockDecoration.mesh.position.z = posZ;
+                // Faire varier la taille
+                const scale = 0.6 + Math.random() * 0.8;
+                rockDecoration.mesh.scale.set(scale, scale, scale);
+                decorations.push(rockDecoration);
               }
             }
           }
-        });
-      }
-      // Très loin
-      else {
-        // Ne conserver que les décorations importantes
-        terrainSegment.decorations.forEach((decoration) => {
-          if (decoration) {
-            if (
-              decoration.userData &&
-              decoration.userData.type !== DECORATION_TYPES.SIGN
-            ) {
-              decoration.visible = false; // Masquer tout sauf les panneaux
+        }
+
+        // Ajouter des arbres avec densité augmentée
+        if (zone.decorTypes.includes('tree')) {
+          const treeCount = Math.floor(
+            nbPoints *
+              baseDensity.TREE *
+              zone.densityFactor *
+              terrainMultiplier *
+              (zoneWidth / 5)
+          );
+
+          for (let i = 0; i < treeCount; i++) {
+            const point = getRandomPoint();
+            if (!point) continue;
+
+            // Position avec variation
+            const posX = point.x + (Math.random() - 0.5) * 4;
+            const posZ = zone.zMin + Math.random() * (zone.zMax - zone.zMin);
+
+            // Vérifier l'espace disponible
+            if (isSpaceAvailable(posX, posZ, 3)) {
+              // Utiliser la nouvelle méthode pour créer un modèle d'arbre
+              const treeModel = this.createTreeModel(
+                Math.floor(Math.random() * 100)
+              );
+
+              if (treeModel) {
+                // Positionner le modèle
+                treeModel.position.set(posX, point.y, posZ);
+                treeModel.visible = true;
+
+                // Varier la taille des arbres
+                const distanceFromCenter = Math.abs(posZ);
+                const scaleFactor =
+                  0.7 + (distanceFromCenter / 15) * 0.4 + Math.random() * 0.3;
+                treeModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+
+                // Rotation aléatoire
+                treeModel.rotation.y = Math.random() * Math.PI * 2;
+
+                // Légère inclinaison aléatoire
+                treeModel.rotation.x = (Math.random() - 0.5) * 0.1;
+                treeModel.rotation.z = (Math.random() - 0.5) * 0.2;
+
+                // Ajouter à la scène
+                this.scene.add(treeModel);
+
+                // Ajouter aux décorations
+                decorations.push({
+                  mesh: treeModel,
+                  type: DECORATION_TYPES.TREE,
+                });
+              }
             }
           }
-        });
-      }
+        }
+
+        // Ajouter des panneaux
+        if (zone.decorTypes.includes('sign')) {
+          // Panneaux spécifiques aux positions clés (tous les 50m environ)
+          if ((startX % 50 < 10 || startX % 100 < 20) && startX > 10) {
+            const signPoint =
+              availablePoints[Math.floor(availablePoints.length / 3)];
+            if (signPoint) {
+              // Alterner entre le côté gauche et droit
+              const side = Math.floor(startX / 50) % 2 === 0 ? -2.5 : 2.5;
+
+              // Utiliser la nouvelle méthode de création de panneaux
+              const signModel = this.createSignModel(
+                Math.floor(startX / 50) % 3
+              );
+
+              if (signModel) {
+                // Positionner le panneau
+                signModel.position.set(signPoint.x, signPoint.y + 0.1, side);
+                signModel.visible = true;
+
+                // Orienter le panneau
+                signModel.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+
+                // Ajuster la taille
+                const scale = 0.8 + Math.random() * 0.4;
+                signModel.scale.set(scale, scale, scale);
+
+                // Ajouter à la scène
+                this.scene.add(signModel);
+
+                // Ajouter aux décorations
+                decorations.push({
+                  mesh: signModel,
+                  type: DECORATION_TYPES.SIGN,
+                });
+              }
+            }
+          }
+
+          // Panneaux supplémentaires aléatoires
+          const signCount = Math.floor(
+            nbPoints *
+              baseDensity.SIGN *
+              zone.densityFactor *
+              terrainMultiplier *
+              (zoneWidth / 10)
+          );
+
+          for (let i = 0; i < signCount; i++) {
+            const point = getRandomPoint();
+            if (!point) continue;
+
+            const posX = point.x + (Math.random() - 0.5) * 3;
+            const posZ = zone.zMin + Math.random() * (zone.zMax - zone.zMin);
+
+            if (isSpaceAvailable(posX, posZ, 4)) {
+              const signModel = this.createSignModel(
+                i + Math.floor(Math.random() * 10)
+              );
+
+              if (signModel) {
+                signModel.position.set(posX, point.y + 0.1, posZ);
+                signModel.visible = true;
+                signModel.rotation.y = Math.random() * Math.PI * 2;
+
+                const scale = 0.7 + Math.random() * 0.3;
+                signModel.scale.set(scale, scale, scale);
+
+                this.scene.add(signModel);
+
+                decorations.push({
+                  mesh: signModel,
+                  type: DECORATION_TYPES.SIGN,
+                });
+              }
+            }
+          }
+        }
+      });
+
+      console.log(
+        `Ajout de ${decorations.length} décorations au segment ${startX}`
+      );
+    } catch (error) {
+      console.error("Erreur lors de l'ajout des décorations:", error);
+    }
+  }
+
+  // Système de niveau de détail (LOD) pour les terrains éloignés
+  applyLOD(
+    segment,
+    distanceFromPlayer,
+    isStartup = false,
+    vehiclePosition = null
+  ) {
+    if (!segment) return;
+
+    const lodDistances = {
+      HIGH: 100,
+      MEDIUM: 200,
+      LOW: 400,
+    };
+
+    // LOD pour les meshes du terrain
+    if (segment.meshes && Array.isArray(segment.meshes)) {
+      segment.meshes.forEach((mesh) => {
+        if (!mesh) return;
+
+        // Obtenir les infos de la partie de terrain
+        const partType = mesh.userData?.part || 'central';
+
+        // Vérifier que le mesh a un matériau valide
+        if (!mesh.material) return;
+
+        // Ne jamais mettre les bordures en wireframe, quelle que soit la distance
+        mesh.material.wireframe = false;
+
+        // Réduire seulement les autres aspects visuels pour les parties lointaines
+        if (distanceFromPlayer > lodDistances.MEDIUM) {
+          // Réduire seulement l'ombrage pour les parties lointaines
+          mesh.castShadow = partType === 'central';
+          mesh.receiveShadow = partType === 'central';
+        } else {
+          // Restaurer la qualité pour les parties proches
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+        }
+      });
+    }
+
+    // LOD pour les décorations
+    if (segment.decorations && Array.isArray(segment.decorations)) {
+      segment.decorations.forEach((decoration) => {
+        if (!decoration || !decoration.mesh) return;
+
+        // Gérer la visibilité en fonction de la distance
+        if (distanceFromPlayer > lodDistances.LOW) {
+          // Masquer les décorations très lointaines
+          decoration.mesh.visible = false;
+        } else if (distanceFromPlayer > lodDistances.MEDIUM) {
+          // Réduire les détails pour les décorations à distance moyenne
+          decoration.mesh.visible = true;
+
+          // Simplifier la géométrie ou réduire la qualité si possible
+          if (decoration.mesh.traverse) {
+            decoration.mesh.traverse((child) => {
+              if (child.isMesh) {
+                child.castShadow = false;
+                child.receiveShadow = false;
+              }
+            });
+          }
+        } else {
+          // Détails complets pour les décorations proches
+          decoration.mesh.visible = true;
+
+          if (decoration.mesh.traverse) {
+            decoration.mesh.traverse((child) => {
+              if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+              }
+            });
+          }
+        }
+      });
     }
   }
 
@@ -1772,5 +2589,709 @@ export default class Terrain {
         originalPoint.height = validPoint.y;
       }
     }
+  }
+
+  // Initialise les pools de ressources pour les décorations
+  initDecorationResources() {
+    // Création des pools vides
+    this.decorationPools = {
+      [DECORATION_TYPES.TREE]: [],
+      [DECORATION_TYPES.ROCK]: [],
+      [DECORATION_TYPES.SIGN]: [],
+    };
+
+    // Vérification des pools à chaque démarrage
+    console.log('Initialisation des pools de décorations');
+
+    try {
+      // Pool d'arbres
+      const numTrees = TERRAIN_CONFIG.DECORATION_DENSITY.TREE;
+      for (let i = 0; i < numTrees; i++) {
+        const tree = this.createTreeModel(i);
+        if (tree) this.decorationPools[DECORATION_TYPES.TREE].push(tree);
+      }
+      console.log(
+        `Pool d'arbres créé avec ${
+          this.decorationPools[DECORATION_TYPES.TREE].length
+        } modèles`
+      );
+
+      // Pool de rochers
+      const numRocks = TERRAIN_CONFIG.DECORATION_DENSITY.ROCK;
+      for (let i = 0; i < numRocks; i++) {
+        const rock = this.createRockModel(i);
+        if (rock) this.decorationPools[DECORATION_TYPES.ROCK].push(rock);
+      }
+      console.log(
+        `Pool de rochers créé avec ${
+          this.decorationPools[DECORATION_TYPES.ROCK].length
+        } modèles`
+      );
+
+      // Pool de panneaux
+      const numSigns = TERRAIN_CONFIG.DECORATION_DENSITY.SIGN;
+      for (let i = 0; i < numSigns; i++) {
+        const sign = this.createSignModel(i);
+        if (sign) this.decorationPools[DECORATION_TYPES.SIGN].push(sign);
+      }
+      console.log(
+        `Pool de panneaux créé avec ${
+          this.decorationPools[DECORATION_TYPES.SIGN].length
+        } modèles`
+      );
+    } catch (error) {
+      console.error(
+        "Erreur lors de l'initialisation des pools de décorations:",
+        error
+      );
+      // Créer des pools de secours minimalistes en cas d'erreur
+      this.createBackupDecorationPools();
+    }
+  }
+
+  // Crée des pools de secours en cas d'erreur d'initialisation
+  createBackupDecorationPools() {
+    console.warn('Création de pools de secours pour les décorations');
+
+    // Réinitialiser les pools
+    this.decorationPools = {
+      [DECORATION_TYPES.TREE]: [],
+      [DECORATION_TYPES.ROCK]: [],
+      [DECORATION_TYPES.SIGN]: [],
+    };
+
+    // Créer au moins un modèle de chaque type
+    try {
+      // Arbre de secours
+      const backupTree = this.createBackupTreeModel();
+      if (backupTree) {
+        this.decorationPools[DECORATION_TYPES.TREE].push(backupTree);
+        console.log("Modèle d'arbre de secours créé");
+      }
+
+      // Rocher de secours
+      const backupRock = this.createBackupRockModel();
+      if (backupRock) {
+        this.decorationPools[DECORATION_TYPES.ROCK].push(backupRock);
+        console.log('Modèle de rocher de secours créé');
+      }
+
+      // Panneau de secours
+      const backupSign = this.createBackupSignModel();
+      if (backupSign) {
+        this.decorationPools[DECORATION_TYPES.SIGN].push(backupSign);
+        console.log('Modèle de panneau de secours créé');
+      }
+    } catch (error) {
+      console.error('Échec de la création des modèles de secours:', error);
+    }
+  }
+
+  // Modèles de secours simplifiés
+  createBackupTreeModel() {
+    try {
+      const geometry = new THREE.CylinderGeometry(0.2, 0.4, 2, 5);
+      const material = new THREE.MeshLambertMaterial({ color: 0x006400 });
+      const trunk = new THREE.Mesh(geometry, material);
+
+      const topGeometry = new THREE.ConeGeometry(1, 2, 6);
+      const topMaterial = new THREE.MeshLambertMaterial({ color: 0x228b22 });
+      const top = new THREE.Mesh(topGeometry, topMaterial);
+      top.position.y = 2;
+
+      const tree = new THREE.Group();
+      tree.add(trunk);
+      tree.add(top);
+
+      return tree;
+    } catch (error) {
+      console.error(
+        "Échec de la création du modèle d'arbre de secours:",
+        error
+      );
+      return null;
+    }
+  }
+
+  createBackupRockModel() {
+    try {
+      const geometry = new THREE.DodecahedronGeometry(0.6, 0);
+      const material = new THREE.MeshLambertMaterial({ color: 0x808080 });
+      return new THREE.Mesh(geometry, material);
+    } catch (error) {
+      console.error(
+        'Échec de la création du modèle de rocher de secours:',
+        error
+      );
+      return null;
+    }
+  }
+
+  createBackupSignModel() {
+    try {
+      const postGeometry = new THREE.BoxGeometry(0.1, 1, 0.1);
+      const postMaterial = new THREE.MeshLambertMaterial({ color: 0x8b4513 });
+      const post = new THREE.Mesh(postGeometry, postMaterial);
+
+      const signGeometry = new THREE.BoxGeometry(0.6, 0.4, 0.05);
+      const signMaterial = new THREE.MeshLambertMaterial({ color: 0xffd700 });
+      const sign = new THREE.Mesh(signGeometry, signMaterial);
+      sign.position.y = 0.5;
+
+      const signGroup = new THREE.Group();
+      signGroup.add(post);
+      signGroup.add(sign);
+
+      return signGroup;
+    } catch (error) {
+      console.error(
+        'Échec de la création du modèle de panneau de secours:',
+        error
+      );
+      return null;
+    }
+  }
+
+  // Crée une décoration à partir des pools
+  createDecoration(type, x, y, z) {
+    // Vérifier si les pools sont initialisés
+    if (!this.decorationPools) {
+      console.warn('Les pools de décorations ne sont pas initialisés');
+      this.initDecorationResources();
+    }
+
+    // Vérifier si le pool spécifique existe
+    if (
+      !this.decorationPools[type] ||
+      this.decorationPools[type].length === 0
+    ) {
+      console.warn(`Le pool de type ${type} n'est pas initialisé ou est vide`);
+      // Tenter de créer des pools de secours si nécessaire
+      if (
+        !this.decorationPools[type] ||
+        this.decorationPools[type].length === 0
+      ) {
+        this.createBackupDecorationPools();
+      }
+
+      // Vérifier à nouveau après tentative de secours
+      if (
+        !this.decorationPools[type] ||
+        this.decorationPools[type].length === 0
+      ) {
+        console.error(`Impossible de créer une décoration de type ${type}`);
+        return null;
+      }
+    }
+
+    try {
+      // Choisir un modèle aléatoire du pool
+      const randomIndex = Math.floor(
+        Math.random() * this.decorationPools[type].length
+      );
+      const template = this.decorationPools[type][randomIndex];
+
+      if (!template) {
+        console.warn(
+          `Modèle invalide trouvé dans le pool ${type} à l'index ${randomIndex}`
+        );
+        return null;
+      }
+
+      // Cloner le modèle
+      const model = template.clone();
+
+      // Positionner la décoration
+      model.position.set(x, y, z);
+
+      // Rotation aléatoire pour les arbres et rochers
+      if (type === DECORATION_TYPES.TREE || type === DECORATION_TYPES.ROCK) {
+        model.rotation.y = Math.random() * Math.PI * 2;
+      }
+
+      // Échelle aléatoire
+      let scale = 1.0;
+      switch (type) {
+        case DECORATION_TYPES.TREE:
+          scale = 0.7 + Math.random() * 0.7;
+          break;
+        case DECORATION_TYPES.ROCK:
+          scale = 0.5 + Math.random() * 0.7;
+          break;
+        case DECORATION_TYPES.SIGN:
+          scale = 0.9 + Math.random() * 0.2;
+          break;
+      }
+
+      model.scale.set(scale, scale, scale);
+
+      // Configurer les ombres
+      model.castShadow = true;
+      model.receiveShadow = true;
+
+      // Récursivement configurer les ombres pour les enfants
+      model.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+
+      // Ajouter à la scène
+      this.scene.add(model);
+
+      return {
+        type: type,
+        mesh: model,
+        position: { x, y, z },
+      };
+    } catch (error) {
+      console.error(
+        `Erreur lors de la création d'une décoration de type ${type}:`,
+        error
+      );
+      return null;
+    }
+  }
+
+  // Crée un modèle d'arbre pour le pool
+  createTreeModel(index) {
+    try {
+      // Varier les types d'arbres en fonction de l'index
+      const treeType = index % 3;
+      const treeGroup = new THREE.Group();
+
+      // Tronc de base
+      let trunkGeometry, leavesMaterial;
+
+      switch (treeType) {
+        case 0: // Pin
+          trunkGeometry = new THREE.CylinderGeometry(0.2, 0.3, 2.8, 8);
+          const pineLeaves = new THREE.ConeGeometry(1.2, 4.0, 8);
+          leavesMaterial = new THREE.MeshStandardMaterial({
+            color: 0x2d572c,
+            roughness: 0.8,
+            metalness: 0.1,
+          });
+
+          const trunk = new THREE.Mesh(
+            trunkGeometry,
+            new THREE.MeshStandardMaterial({
+              color: 0x5d4037,
+              roughness: 0.9,
+              metalness: 0.0,
+            })
+          );
+          trunk.position.y = 1.4;
+          treeGroup.add(trunk);
+
+          // Plusieurs cônes pour le pin
+          const cone1 = new THREE.Mesh(pineLeaves, leavesMaterial);
+          cone1.position.y = 4.0;
+          treeGroup.add(cone1);
+
+          const cone2 = new THREE.Mesh(pineLeaves, leavesMaterial);
+          cone2.position.y = 3.2;
+          cone2.scale.set(1.2, 0.8, 1.2);
+          treeGroup.add(cone2);
+
+          const cone3 = new THREE.Mesh(pineLeaves, leavesMaterial);
+          cone3.position.y = 2.4;
+          cone3.scale.set(1.4, 0.6, 1.4);
+          treeGroup.add(cone3);
+          break;
+
+        case 1: // Arbre arrondi
+          trunkGeometry = new THREE.CylinderGeometry(0.15, 0.3, 2.2, 8);
+          const sphereGeometry = new THREE.SphereGeometry(1.8, 8, 6);
+          leavesMaterial = new THREE.MeshStandardMaterial({
+            color: 0x4caf50,
+            roughness: 0.8,
+            metalness: 0.0,
+          });
+
+          const roundTrunk = new THREE.Mesh(
+            trunkGeometry,
+            new THREE.MeshStandardMaterial({
+              color: 0x795548,
+              roughness: 0.9,
+              metalness: 0.0,
+            })
+          );
+          roundTrunk.position.y = 1.1;
+          treeGroup.add(roundTrunk);
+
+          // Feuillage sphérique
+          const leaves = new THREE.Mesh(sphereGeometry, leavesMaterial);
+          leaves.position.y = 3.2;
+          treeGroup.add(leaves);
+          break;
+
+        case 2: // Arbre stylisé bas
+          trunkGeometry = new THREE.CylinderGeometry(0.25, 0.4, 1.5, 6);
+          const flatLeavesGeometry = new THREE.CylinderGeometry(0, 2.2, 1.5, 8);
+          leavesMaterial = new THREE.MeshStandardMaterial({
+            color: 0x33691e,
+            roughness: 0.7,
+            metalness: 0.1,
+          });
+
+          const shortTrunk = new THREE.Mesh(
+            trunkGeometry,
+            new THREE.MeshStandardMaterial({
+              color: 0x6d4c41,
+              roughness: 0.9,
+              metalness: 0.0,
+            })
+          );
+          shortTrunk.position.y = 0.75;
+          treeGroup.add(shortTrunk);
+
+          // Feuillage plat
+          const flatLeaves = new THREE.Mesh(flatLeavesGeometry, leavesMaterial);
+          flatLeaves.position.y = 2.0;
+          treeGroup.add(flatLeaves);
+          break;
+      }
+
+      // Configurer les ombres pour tous les enfants
+      treeGroup.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+
+      return treeGroup;
+    } catch (error) {
+      console.error("Erreur lors de la création du modèle d'arbre:", error);
+      return this.createBackupTreeModel();
+    }
+  }
+
+  // Crée un modèle de rocher pour le pool
+  createRockModel(index) {
+    try {
+      // Varier les types de rochers en fonction de l'index
+      const rockType = index % 4;
+
+      let rockGeometry;
+      let rockMaterial;
+
+      switch (rockType) {
+        case 0: // Rocher anguleux
+          rockGeometry = new THREE.DodecahedronGeometry(0.8, 0);
+          rockMaterial = new THREE.MeshStandardMaterial({
+            color: 0x7f7f7f,
+            roughness: 0.9,
+            metalness: 0.2,
+          });
+          break;
+
+        case 1: // Petit rocher arrondi
+          rockGeometry = new THREE.SphereGeometry(0.6, 7, 5);
+          rockMaterial = new THREE.MeshStandardMaterial({
+            color: 0x9e9e9e,
+            roughness: 0.85,
+            metalness: 0.15,
+          });
+          break;
+
+        case 2: // Rocher plat
+          rockGeometry = new THREE.BoxGeometry(1.2, 0.4, 0.8);
+          rockMaterial = new THREE.MeshStandardMaterial({
+            color: 0x757575,
+            roughness: 0.8,
+            metalness: 0.1,
+          });
+          break;
+
+        case 3: // Rocher composite
+          // Créer un groupe pour assembler plusieurs formes
+          const rockGroup = new THREE.Group();
+
+          // Base du rocher
+          const baseGeometry = new THREE.BoxGeometry(1.2, 0.6, 0.9);
+          const baseMaterial = new THREE.MeshStandardMaterial({
+            color: 0x616161,
+            roughness: 0.9,
+            metalness: 0.1,
+          });
+          const baseRock = new THREE.Mesh(baseGeometry, baseMaterial);
+          rockGroup.add(baseRock);
+
+          // Ajouter des petites formations sur le dessus
+          const topGeometry = new THREE.TetrahedronGeometry(0.4);
+          const topMaterial = new THREE.MeshStandardMaterial({
+            color: 0x727272,
+            roughness: 0.85,
+            metalness: 0.15,
+          });
+
+          // Placement de quelques tétraèdres
+          const top1 = new THREE.Mesh(topGeometry, topMaterial);
+          top1.position.set(0.2, 0.5, 0.1);
+          top1.rotation.set(0.5, 0.8, 0.2);
+          rockGroup.add(top1);
+
+          const top2 = new THREE.Mesh(topGeometry, topMaterial);
+          top2.position.set(-0.3, 0.4, -0.2);
+          top2.rotation.set(0.3, -0.4, 0.1);
+          top2.scale.set(0.7, 0.7, 0.7);
+          rockGroup.add(top2);
+
+          // Configurer les ombres
+          rockGroup.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+
+          return rockGroup;
+      }
+
+      // Pour les types 0-2, créer un mesh simple
+      if (rockType < 3) {
+        const rock = new THREE.Mesh(rockGeometry, rockMaterial);
+
+        // Déformer légèrement pour plus de naturel
+        if (rockGeometry.attributes && rockGeometry.attributes.position) {
+          const positionAttribute = rockGeometry.attributes.position;
+          const vertex = new THREE.Vector3();
+
+          for (let i = 0; i < positionAttribute.count; i++) {
+            vertex.fromBufferAttribute(positionAttribute, i);
+
+            // Déformation aléatoire mais déterministe basée sur la position
+            const noise =
+              0.1 *
+              Math.sin(vertex.x * 5 + index) *
+              Math.cos(vertex.y * 3 + index * 2) *
+              Math.sin(vertex.z * 4 + index * 3);
+
+            vertex.x += noise;
+            vertex.y += noise;
+            vertex.z += noise;
+
+            positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
+          }
+
+          positionAttribute.needsUpdate = true;
+          rockGeometry.computeVertexNormals();
+        }
+
+        rock.castShadow = true;
+        rock.receiveShadow = true;
+
+        return rock;
+      }
+    } catch (error) {
+      console.error('Erreur lors de la création du modèle de rocher:', error);
+      return this.createBackupRockModel();
+    }
+  }
+
+  // Crée un modèle de panneau pour le pool
+  createSignModel(index) {
+    try {
+      // Varier les types de panneaux en fonction de l'index
+      const signType = index % 3;
+      const signGroup = new THREE.Group();
+
+      // Matériaux communs
+      const woodMaterial = new THREE.MeshStandardMaterial({
+        color: 0x8d6e63,
+        roughness: 0.9,
+        metalness: 0.0,
+      });
+
+      // Types de panneaux
+      switch (signType) {
+        case 0: // Panneau de direction
+          // Poteau
+          const post = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.08, 0.1, 2.4, 6),
+            woodMaterial
+          );
+          post.position.y = 1.2;
+          signGroup.add(post);
+
+          // Panneau directionnel
+          const arrowGeometry = new THREE.BoxGeometry(1.2, 0.4, 0.06);
+          const arrowMaterial = new THREE.MeshStandardMaterial({
+            color: 0xeeeeee,
+            roughness: 0.5,
+            metalness: 0.1,
+          });
+          const arrow = new THREE.Mesh(arrowGeometry, arrowMaterial);
+          arrow.position.y = 2.0;
+          arrow.position.x = 0.4; // Décalé sur le côté
+          arrow.rotation.z = Math.PI * 0.05; // Légèrement incliné
+          signGroup.add(arrow);
+
+          // Triangle pour la pointe de la flèche
+          const triangleShape = new THREE.Shape();
+          triangleShape.moveTo(0, 0);
+          triangleShape.lineTo(0.3, 0.2);
+          triangleShape.lineTo(0, 0.4);
+          triangleShape.lineTo(0, 0);
+
+          const extrudeSettings = {
+            steps: 1,
+            depth: 0.06,
+            bevelEnabled: false,
+          };
+
+          const triangleGeometry = new THREE.ExtrudeGeometry(
+            triangleShape,
+            extrudeSettings
+          );
+          const triangle = new THREE.Mesh(triangleGeometry, arrowMaterial);
+          triangle.position.set(
+            arrow.position.x + 0.6,
+            arrow.position.y - 0.2,
+            -0.03
+          );
+          signGroup.add(triangle);
+          break;
+
+        case 1: // Panneau d'information
+          // Poteau
+          const infoPost = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.1, 0.12, 2.2, 6),
+            woodMaterial
+          );
+          infoPost.position.y = 1.1;
+          signGroup.add(infoPost);
+
+          // Panneau carré
+          const panelGeometry = new THREE.BoxGeometry(1.0, 0.8, 0.04);
+          const panelMaterial = new THREE.MeshStandardMaterial({
+            color: 0x4fc3f7,
+            roughness: 0.5,
+            metalness: 0.2,
+          });
+          const panel = new THREE.Mesh(panelGeometry, panelMaterial);
+          panel.position.y = 1.9;
+          signGroup.add(panel);
+
+          // Cadre en bois pour le panneau
+          const frameGeometry = new THREE.BoxGeometry(1.1, 0.9, 0.02);
+          const frame = new THREE.Mesh(frameGeometry, woodMaterial);
+          frame.position.y = 1.9;
+          frame.position.z = -0.03;
+          signGroup.add(frame);
+          break;
+
+        case 2: // Panneau d'avertissement
+          // Double poteau
+          const post1 = new THREE.Mesh(
+            new THREE.BoxGeometry(0.1, 2.6, 0.1),
+            woodMaterial
+          );
+          post1.position.set(-0.4, 1.3, 0);
+          signGroup.add(post1);
+
+          const post2 = new THREE.Mesh(
+            new THREE.BoxGeometry(0.1, 2.6, 0.1),
+            woodMaterial
+          );
+          post2.position.set(0.4, 1.3, 0);
+          signGroup.add(post2);
+
+          // Panneau d'avertissement triangulaire
+          const warnShape = new THREE.Shape();
+          warnShape.moveTo(0, 0.8);
+          warnShape.lineTo(-0.7, -0.4);
+          warnShape.lineTo(0.7, -0.4);
+          warnShape.lineTo(0, 0.8);
+
+          const warnExtrudeSettings = {
+            steps: 1,
+            depth: 0.05,
+            bevelEnabled: false,
+          };
+
+          const warnGeometry = new THREE.ExtrudeGeometry(
+            warnShape,
+            warnExtrudeSettings
+          );
+          const warnMaterial = new THREE.MeshStandardMaterial({
+            color: 0xffeb3b,
+            roughness: 0.5,
+            metalness: 0.3,
+          });
+          const warnPanel = new THREE.Mesh(warnGeometry, warnMaterial);
+          warnPanel.position.set(0, 2.0, 0);
+          signGroup.add(warnPanel);
+
+          // Point d'exclamation
+          const exclamationBar = new THREE.Mesh(
+            new THREE.BoxGeometry(0.08, 0.4, 0.06),
+            new THREE.MeshStandardMaterial({ color: 0x000000 })
+          );
+          exclamationBar.position.set(0, 1.9, 0.03);
+          signGroup.add(exclamationBar);
+
+          const exclamationDot = new THREE.Mesh(
+            new THREE.BoxGeometry(0.08, 0.08, 0.06),
+            new THREE.MeshStandardMaterial({ color: 0x000000 })
+          );
+          exclamationDot.position.set(0, 1.65, 0.03);
+          signGroup.add(exclamationDot);
+          break;
+      }
+
+      // Configurer les ombres pour tous les enfants
+      signGroup.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+
+      return signGroup;
+    } catch (error) {
+      console.error('Erreur lors de la création du modèle de panneau:', error);
+      return this.createBackupSignModel();
+    }
+  }
+
+  // Obtenir la rigidité du segment en fonction du type de chunk
+  getSegmentRigidity(chunkType) {
+    // Déterminer le multiplicateur de rigidité selon le type de terrain
+    switch (chunkType) {
+      case 'gap':
+        return 0.1; // Rigidité réduite pour les trous
+      case 'ramp':
+        return 1.5; // Rigidité augmentée pour les rampes
+      case 'washboard':
+        return 1.2; // Rigidité accrue pour les zones ondulées
+      case 'valley':
+        return 0.8; // Rigidité moyenne pour les vallées
+      case 'plateau':
+        return 1.0; // Rigidité standard pour les plateaux
+      default:
+        return 1.0; // Rigidité standard pour les autres types
+    }
+  }
+
+  initTerrain() {
+    this.playerPosCache = { x: 0, z: 0 };
+    this.terrainMeshes = [];
+    this.renderDistance = 800; // Distance de rendu
+    this.preloadDistance = 400; // Distance de préchargement
+
+    // Créer un nombre suffisant de segments initiaux (20 segments à partir de -5)
+    const initialSegments = 20;
+    const startOffset = -5;
+
+    for (let i = startOffset; i < initialSegments + startOffset; i++) {
+      this.createTerrainSegment(i * this.segmentWidth, false);
+    }
+
+    // Appliquer les niveaux de détail immédiatement
+    this.updateLOD();
   }
 }
